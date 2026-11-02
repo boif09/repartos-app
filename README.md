@@ -13,7 +13,7 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 | F2 | Importes exactos (con "repartir lo que falta"), partes y reparto por defecto del grupo | ✅ |
 | F3 | Moneda por grupo y por gasto, tipo del BCE (Frankfurter) con caché, tipo manual y "me cobraron" | ✅ |
 | F4 | PWA instalable, consulta sin conexión, enlace de solo lectura para amigos, ficha de persona | ✅ |
-| F5 | Despliegue en `repartos.jusboif.es`, script de despliegue y copias diarias | Preparado ([guía](docs/DESPLIEGUE.md)) |
+| F5 | Despliegue en `repartos.jusboif.es`, script de despliegue y copias diarias | ✅ ([guía](docs/DESPLIEGUE.md)) |
 
 ## Requisitos
 

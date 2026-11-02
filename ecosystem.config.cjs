@@ -6,6 +6,8 @@ module.exports = {
       script: './server.js',
       cwd: __dirname,
       node_args: '--no-warnings',
+      // Un solo proceso en modo fork, como el resto de apps del servidor (pm2 7 usa cluster si no se indica).
+      exec_mode: 'fork',
       instances: 1,
       autorestart: true,
       watch: false,
