@@ -156,6 +156,8 @@ const ICONS = {
   plus: ['M12 5v14', 'M5 12h14'],
   swap: ['M7 7h11l-3-3', 'M17 17H6l3 3'],
   check: ['M20 6L9 17l-5-5'],
+  down: ['M6 9l6 6 6-6'],
+  calendar: ['M8 2v4', 'M16 2v4', 'M3 10h18', 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'],
   users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M22 21v-2a4 4 0 0 0-3-3.87', 'M16 3.13a4 4 0 0 1 0 7.75'],
   heart: ['M19 14c1.5-1.5 3-3.2 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.8 0-3 .5-4.5 2-1.5-1.5-2.7-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4 3 5.5l7 7z'],
   home: ['M3 10.5L12 3l9 7.5', 'M5 9.5V21h14V9.5', 'M10 21v-6h4v6'],
@@ -353,8 +355,12 @@ async function groupsView() {
       archived.length > 0 && el('details', { class: 'archived' },
         el('summary', { text: `Archivados (${archived.length})` }),
         el('div', { class: 'card list' }, archived.map(row))),
-      el('a', { class: 'btn ghost block', href: '#/personas', text: 'Personas y saldos' })),
-    el('a', { class: 'fab', href: '#/nuevo-grupo' }, icon('plus'), 'Nuevo grupo'));
+      el('div', { class: 'home-links' },
+        el('a', { class: 'btn secondary', href: '#/nuevo-grupo' }, icon('plus', { small: true }), 'Nuevo grupo'),
+        el('a', { class: 'btn secondary', href: '#/personas' }, icon('users', { small: true }), 'Personas'))),
+    active.length
+      ? el('a', { class: 'fab', href: '#/gasto' }, icon('plus'), 'Añadir gasto')
+      : el('a', { class: 'fab', href: '#/nuevo-grupo' }, icon('plus'), 'Nuevo grupo'));
 }
 
 async function newGroupView() {
@@ -579,6 +585,7 @@ function balanceHero(bundle, tab) {
 
 async function groupView(groupId, tab) {
   const bundle = await api(`groups/${groupId}`);
+  rememberGroup(bundle.group.id);
   const people = new Map(bundle.members.map((person) => [person.id, person]));
   const base = `#/g/${groupId}`;
 
@@ -658,11 +665,69 @@ function splitSummary(expense, memberCount) {
   return expense.shares.length === memberCount ? 'entre todos' : `entre ${expense.shares.length}`;
 }
 
-async function expenseFormView(groupId, expenseId) {
-  const bundle = await api(`groups/${groupId}`);
+// Lo escrito al cambiar de grupo desde el propio formulario (importe, descripción, moneda).
+let expenseDraft = null;
+
+function rememberGroup(groupId) {
+  try {
+    localStorage.setItem('repartos-last-group', String(groupId));
+  } catch { /* sin almacenamiento: no pasa nada */ }
+}
+
+function lastGroupId() {
+  try {
+    return Number(localStorage.getItem('repartos-last-group')) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Chip compacto que abre un selector nativo: en el móvil sale la rueda o la lista del sistema.
+function pickerChip({ leading, label, text, options, value, onChange, ariaLabel }) {
+  const textNode = el('strong', { text });
+  const leadingSlot = el('span', { class: 'picker-leading' }, leading);
+  const select = el('select', {
+    'aria-label': ariaLabel,
+    onChange: () => onChange(select.value, { setText: (next) => { textNode.textContent = next; }, setLeading: (node) => leadingSlot.replaceChildren(node) }),
+  }, options.map(([optionValue, optionLabel]) => el('option', { value: String(optionValue), text: optionLabel })));
+  select.value = String(value);
+  return el('span', { class: 'picker-chip' },
+    leadingSlot,
+    el('span', { class: 'picker-text' }, label && el('span', { class: 'picker-label', text: label }), textNode),
+    icon('down', { small: true }),
+    select);
+}
+
+// Chip de fecha: muestra "Hoy", "Ayer" o "2 nov" y abre el calendario nativo.
+function dateChip(input, onChange) {
+  const textNode = el('strong', { text: formatDay(input.value) });
+  input.classList.add('chip-overlay');
+  input.addEventListener('click', () => input.showPicker?.());
+  input.addEventListener('change', () => {
+    if (!input.value) input.value = todayIso();
+    textNode.textContent = formatDay(input.value);
+    onChange();
+  });
+  return el('span', { class: 'picker-chip' },
+    el('span', { class: 'picker-leading' }, icon('calendar', { small: true })),
+    el('span', { class: 'picker-text' }, textNode),
+    input);
+}
+
+async function expenseFormView(groupId, expenseId, query) {
+  const [bundle, groupList] = await Promise.all([
+    api(`groups/${groupId}`),
+    expenseId ? null : api('groups'),
+  ]);
   const editing = expenseId ? bundle.expenses.find((expense) => expense.id === expenseId) : null;
   if (expenseId && !editing) throw new Error('Este gasto ya no existe.');
   if (bundle.group.archived) throw new Error('El grupo está archivado.');
+  rememberGroup(bundle.group.id);
+
+  const fromHome = query?.get('desde') === 'inicio';
+  const backHref = fromHome ? '#/' : `#/g/${groupId}`;
+  const draft = editing ? null : expenseDraft;
+  expenseDraft = null;
 
   const id = editing?.id ?? crypto.randomUUID();
   const members = bundle.members;
@@ -674,7 +739,7 @@ async function expenseFormView(groupId, expenseId) {
   // Moneda: la del grupo (base) o la del gasto. Los saldos siempre van en la del grupo.
   const base = bundle.group.baseCurrency;
   const baseExp = currencyExponent(base);
-  let currency = editing?.currency ?? lastCurrency(bundle) ?? base;
+  let currency = editing?.currency ?? draft?.currency ?? lastCurrency(bundle) ?? base;
   const exp = () => currencyExponent(currency);
   // Origen del tipo escrito en el campo: BCE o a mano. Lo de la tarjeta va aparte, en cardInput.
   let fxSource = editing?.fxSource === 'manual' ? 'manual' : 'ecb';
@@ -694,10 +759,13 @@ async function expenseFormView(groupId, expenseId) {
     return [member.id, participants.has(member.id) ? 1 : 0];
   }));
 
-  const description = el('input', { type: 'text', maxLength: 120, placeholder: 'Cena, gasolina, súper…', autocomplete: 'off', value: editing?.description ?? '' });
   const amount = el('input', {
-    type: 'text', inputMode: 'decimal', placeholder: '0,00', autocomplete: 'off', class: 'amount-input',
-    value: editing ? centsToInput(editing.originalMinor, exp()) : '',
+    type: 'text', inputMode: 'decimal', placeholder: '0,00', autocomplete: 'off', class: 'amount-input', 'aria-label': 'Importe',
+    value: editing ? centsToInput(editing.originalMinor, exp()) : draft?.amount ?? '',
+  });
+  const description = el('input', {
+    type: 'text', maxLength: 120, placeholder: '¿En qué? Cena, gasolina, súper…', autocomplete: 'off', 'aria-label': 'Descripción',
+    value: editing?.description ?? draft?.description ?? '',
   });
   // Al cambiar de moneda se conserva la cifra escrita (3.500 sigue siendo 3.500), adaptada a los
   // decimales de la nueva; lo que depende de la moneda anterior (tarjeta y tipo) se vuelve a pedir.
@@ -720,7 +788,7 @@ async function expenseFormView(groupId, expenseId) {
     renderSplitBody();
     refreshRate();
   });
-  const date = el('input', { type: 'date', value: editing?.spentOn ?? todayIso(), max: '2100-12-31' });
+  const date = el('input', { type: 'date', value: editing?.spentOn ?? todayIso(), max: '2100-12-31', 'aria-label': 'Fecha' });
   const rateInput = el('input', { type: 'text', inputMode: 'decimal', autocomplete: 'off', class: 'rate-input', value: editing?.fxRate ?? '' });
   const cardInput = el('input', {
     type: 'text', inputMode: 'decimal', autocomplete: 'off', placeholder: 'Opcional',
@@ -731,7 +799,7 @@ async function expenseFormView(groupId, expenseId) {
   const fxUnit = el('span', { class: 'fx-unit' });
   const converted = el('strong', { class: 'converted' });
   const splitBody = el('div', { class: 'stack' });
-  const preview = el('div', { class: 'card list preview' });
+  const shareLabels = new Map(); // personId -> nodo donde se pinta lo que le toca
   const status = el('p', { class: 'form-status', role: 'status' });
   const exactStatus = el('p', { class: 'exact-status', role: 'status' });
 
@@ -803,8 +871,23 @@ async function expenseFormView(groupId, expenseId) {
     updateConverted();
     updatePreview();
   });
-  date.addEventListener('change', () => refreshRate());
 
+  // "Me cobraron" va plegado: solo hace falta cuando el banco cobró otra cantidad.
+  const cardField = el('label', { class: 'field', hidden: !cardInput.value },
+    el('span', { class: 'field-label', text: `Me cobraron (${currencySymbol(base)})` }),
+    cardInput,
+    el('span', { class: 'field-hint', text: 'Se usará esto en lugar del tipo de cambio.' }));
+  const cardToggle = el('button', {
+    type: 'button',
+    class: 'link-btn',
+    hidden: Boolean(cardInput.value),
+    text: '¿El banco te cobró otra cantidad?',
+    onClick: () => {
+      cardField.hidden = false;
+      cardToggle.hidden = true;
+      cardInput.focus();
+    },
+  });
   fxBox.append(
     el('div', { class: 'fx-row' },
       el('label', { class: 'field' },
@@ -812,10 +895,8 @@ async function expenseFormView(groupId, expenseId) {
         el('span', { class: 'fx-rate' }, fxUnit, rateInput, el('span', { class: 'fx-unit', text: base }))),
       converted),
     fxHint,
-    el('label', { class: 'field' },
-      el('span', { class: 'field-label', text: `Me cobraron (${currencySymbol(base)})` }),
-      cardInput,
-      el('span', { class: 'field-hint', text: 'Si lo pagaste con tarjeta, pon lo que te cargó el banco y se usará eso.' })));
+    cardField,
+    cardToggle);
 
   // Devuelve { entries } listo para la API, o { error } con un mensaje para la persona.
   function currentEntries() {
@@ -838,13 +919,15 @@ async function expenseFormView(groupId, expenseId) {
     return entries.length ? { entries } : { error: 'Escribe el importe de al menos una persona.' };
   }
 
+  // Pinta junto a cada persona lo que le toca (en la moneda del grupo) y el botón de guardar.
   function updatePreview() {
-    preview.replaceChildren();
     status.textContent = '';
     exactStatus.textContent = '';
     exactStatus.className = 'exact-status';
+    for (const label of shareLabels.values()) label.textContent = '';
     const original = originalTotal();
     const total = baseTotal();
+    submit.textContent = `${editing ? 'Guardar cambios' : 'Añadir gasto'}${original ? ` · ${formatMoney(original, currency)}` : ''}`;
     const { entries, error } = currentEntries();
     if (!original && amount.value.trim()) {
       status.textContent = exp() === 0 ? `Importe no válido: ${currency} no usa decimales.` : 'Importe no válido.';
@@ -861,6 +944,7 @@ async function expenseFormView(groupId, expenseId) {
         exactStatus.classList.add(diff === 0 ? 'ok' : 'pending');
       }
       if (error && assigned > 0) status.textContent = error;
+      // En la moneda del grupo el importe ya está en cada casilla; en otra se enseña el equivalente.
       if (error || !total || assigned !== original || currency === base) return;
     }
     if (error) {
@@ -870,9 +954,8 @@ async function expenseFormView(groupId, expenseId) {
     if (!total) return;
     try {
       for (const share of computeShares({ totalCents: total, mode, entries, seed: id, originalTotal: original })) {
-        preview.append(el('div', { class: 'row static' },
-          el('span', { class: 'row-main', text: personName(people, share.personId) }),
-          el('span', { class: 'amount', text: formatMoney(share.owedCents, base) })));
+        const label = shareLabels.get(share.personId);
+        if (label) label.textContent = `${mode === 'exact' ? '≈ ' : ''}${formatMoney(share.owedCents, base)}`;
       }
     } catch (splitError) {
       if (splitError instanceof SplitError) status.textContent = splitError.message;
@@ -899,37 +982,59 @@ async function expenseFormView(groupId, expenseId) {
     renderSplitBody();
   }
 
+  // Una sola lista de personas: cada fila es quién participa y cuánto le toca.
+  function personRow(member, control, { tag = 'div', meta } = {}) {
+    const share = el('span', { class: 'share-amount' });
+    shareLabels.set(member.id, share);
+    return el(tag, { class: 'row static person-row' },
+      avatar(member.id, member.name),
+      el('span', { class: 'row-main' },
+        el('strong', { text: memberLabel(member) }),
+        meta),
+      mode === 'equal' ? share : el('span', { class: 'row-side' }, control, mode === 'shares' || currency !== base ? share : null));
+  }
+
   function renderSplitBody() {
     splitBody.replaceChildren();
+    shareLabels.clear();
     if (mode === 'equal') {
-      const chips = el('div', { class: 'chips' },
-        members.map((member) => chip({
-          label: memberLabel(member),
-          selected: participants.has(member.id),
-          onToggle: (on) => {
-            if (on) participants.add(member.id);
+      const rows = members.map((member) => {
+        const check = el('input', {
+          type: 'checkbox',
+          class: 'check',
+          checked: participants.has(member.id),
+          'aria-label': `${member.name} participa`,
+          onChange: () => {
+            if (check.checked) participants.add(member.id);
             else participants.delete(member.id);
+            row.classList.toggle('off', !check.checked);
             updatePreview();
           },
-        })));
+        });
+        const row = personRow(member, null, { tag: 'label' });
+        row.prepend(check);
+        row.classList.toggle('off', !participants.has(member.id));
+        return row;
+      });
       splitBody.append(
+        el('div', { class: 'card list' }, rows),
         el('div', { class: 'field-row' },
-          el('span', { class: 'field-hint', text: 'Toca para quitar a quien no participa.' }),
+          el('span', { class: 'field-hint', text: 'Desmarca a quien no participa.' }),
           el('button', {
             type: 'button',
             class: 'link-btn',
-            text: 'Todos / ninguno',
+            text: participants.size === members.length ? 'Ninguno' : 'Todos',
             onClick: () => {
               const selectAll = participants.size !== members.length;
-              chips.querySelectorAll('.chip').forEach((node) => {
-                if ((node.getAttribute('aria-checked') === 'true') !== selectAll) node.click();
-              });
+              for (const member of members) {
+                if (selectAll) participants.add(member.id);
+                else participants.delete(member.id);
+              }
+              renderSplitBody();
             },
-          })),
-        chips);
+          })));
     } else if (mode === 'exact') {
       splitBody.append(
-        el('span', { class: 'field-hint', text: `Lo que le toca a cada uno, en ${currencySymbol(currency)}. Vacío = no participa.` }),
         el('div', { class: 'card list' },
           members.map((member) => {
             const input = el('input', {
@@ -945,20 +1050,19 @@ async function expenseFormView(groupId, expenseId) {
                 updatePreview();
               },
             });
-            return el('label', { class: 'row static' }, el('span', { class: 'row-main', text: memberLabel(member) }), input);
+            return personRow(member, input, { tag: 'label' });
           })),
         exactStatus,
+        el('span', { class: 'field-hint', text: `Lo que le toca a cada uno, en ${currencySymbol(currency)}. Vacío = no participa.` }),
         el('button', { type: 'button', class: 'btn secondary block', text: 'Repartir lo que falta a partes iguales', onClick: fillRemaining }));
     } else {
       splitBody.append(
-        el('span', { class: 'field-hint', text: 'Por ejemplo 60 y 40, o 2 y 1 si alguien cuenta doble. 0 = no participa.' }),
         el('div', { class: 'card list' },
-          members.map((member) => el('div', { class: 'row static' },
-            el('span', { class: 'row-main', text: memberLabel(member) }),
-            stepper(weights.get(member.id), (value) => {
-              weights.set(member.id, value);
-              updatePreview();
-            }, member.name)))));
+          members.map((member) => personRow(member, stepper(weights.get(member.id), (value) => {
+            weights.set(member.id, value);
+            updatePreview();
+          }, member.name)))),
+        el('span', { class: 'field-hint', text: 'Por ejemplo 60 y 40, o 2 y 1 si alguien cuenta doble. 0 = no participa.' }));
     }
     updatePreview();
   }
@@ -968,15 +1072,43 @@ async function expenseFormView(groupId, expenseId) {
     updatePreview();
   });
 
+  // Fila de chips: grupo (al crear), quién pagó y fecha.
+  const payerChip = pickerChip({
+    leading: avatar(payerId, people.get(payerId)?.name),
+    label: 'Pagó',
+    text: memberLabel(people.get(payerId)),
+    options: members.map((member) => [member.id, memberLabel(member)]),
+    value: payerId,
+    ariaLabel: 'Quién pagó',
+    onChange: (value, { setText, setLeading }) => {
+      payerId = Number(value);
+      setText(memberLabel(people.get(payerId)));
+      setLeading(avatar(payerId, people.get(payerId)?.name));
+    },
+  });
+  const activeGroups = groupList?.groups.filter((group) => !group.archived) ?? [];
+  const groupChip = activeGroups.length > 1 && pickerChip({
+    leading: groupIcon(bundle.group.emoji),
+    label: 'Grupo',
+    text: bundle.group.title,
+    options: activeGroups.map((group) => [group.id, group.title]),
+    value: bundle.group.id,
+    ariaLabel: 'Grupo',
+    onChange: (value) => {
+      expenseDraft = { amount: amount.value, description: description.value, currency };
+      navigate(`#/g/${value}/gasto${fromHome ? '?desde=inicio' : ''}`, { replace: true });
+    },
+  });
+
   const submit = el('button', { class: 'btn primary', type: 'submit', text: editing ? 'Guardar cambios' : 'Añadir gasto' });
   const form = el('form', {
-    class: 'content form',
+    class: 'content form expense-form',
     novalidate: true,
     onSubmit: async (event) => {
       event.preventDefault();
       const original = originalTotal();
+      if (!original) return (amount.focus(), toast('Escribe el importe.'));
       if (!description.value.trim()) return (description.focus(), toast('Falta la descripción.'));
-      if (!original) return (amount.focus(), toast('Importe no válido.'));
       const { entries, error } = currentEntries();
       if (error) return toast(error);
       if (mode === 'exact') {
@@ -1015,31 +1147,18 @@ async function expenseFormView(groupId, expenseId) {
       }
     },
   },
-  field('Descripción', description),
-  el('div', { class: 'field' },
-    el('span', { class: 'field-label', text: 'Importe' }),
-    el('div', { class: 'amount-row' }, amount, currencyInput)),
+  el('div', { class: 'amount-row' }, amount, currencyInput),
+  description,
+  el('div', { class: 'chips' }, groupChip, payerChip, dateChip(date, () => refreshRate())),
   fxBox,
   el('div', { class: 'field' },
-    el('span', { class: 'field-label', text: 'Pagó' }),
-    el('div', { class: 'chips', role: 'radiogroup' },
-      members.map((member) => chip({
-        label: memberLabel(member),
-        selected: member.id === payerId,
-        role: 'radio',
-        onToggle: () => { payerId = member.id; },
-      })))),
-  field('Fecha', date),
-  el('div', { class: 'field' },
-    el('span', { class: 'field-label', text: 'Cómo se reparte' }),
+    el('span', { class: 'field-label', text: 'Para quién' }),
     segmented(SPLIT_MODES_UI, mode, (value) => {
       mode = value;
       renderSplitBody();
     }, 'Cómo se reparte'),
     splitBody),
-  preview,
   status,
-  submit,
   editing && el('button', {
     type: 'button',
     class: 'btn danger-ghost block',
@@ -1060,14 +1179,31 @@ async function expenseFormView(groupId, expenseId) {
         handleError(error);
       }
     },
-  }));
+  }),
+  // Guardar siempre a la vista, con el importe: sin tener que bajar hasta el final.
+  el('div', { class: 'action-bar' }, submit));
 
-  mount(topbar({ title: editing ? 'Editar gasto' : 'Nuevo gasto', back: `#/g/${groupId}` }), form);
+  mount(topbar({ title: editing ? 'Editar gasto' : 'Nuevo gasto', back: backHref }), form);
   renderFx();
   renderSplitBody();
   // Gasto nuevo en moneda extranjera: se pide ya el tipo del día.
-  if (!editing) refreshRate();
-  if (!editing) description.focus();
+  if (!editing) {
+    refreshRate();
+    amount.focus();
+  }
+}
+
+// "Añadir gasto" desde el inicio: abre el formulario en el último grupo usado.
+async function quickExpenseView() {
+  const { groups } = await api('groups');
+  const active = groups.filter((group) => !group.archived);
+  if (!active.length) {
+    navigate('#/nuevo-grupo', { replace: true });
+    toast('Crea primero un grupo.');
+    return;
+  }
+  const target = active.find((group) => group.id === lastGroupId()) ?? active[0];
+  navigate(`#/g/${target.id}/gasto?desde=inicio`, { replace: true });
 }
 
 async function settlementFormView(groupId, query) {
@@ -1418,8 +1554,9 @@ const ROUTES = [
   [/^\/nuevo-grupo$/, () => newGroupView()],
   [/^\/g\/(\d+)$/, ([id]) => groupView(id, 'gastos')],
   [/^\/g\/(\d+)\/saldos$/, ([id]) => groupView(id, 'saldos')],
-  [/^\/g\/(\d+)\/gasto$/, ([id]) => expenseFormView(id, null)],
-  [/^\/g\/(\d+)\/gasto\/([\w-]+)$/, ([id, expenseId]) => expenseFormView(id, expenseId)],
+  [/^\/gasto$/, () => quickExpenseView()],
+  [/^\/g\/(\d+)\/gasto$/, ([id], query) => expenseFormView(id, null, query)],
+  [/^\/g\/(\d+)\/gasto\/([\w-]+)$/, ([id, expenseId], query) => expenseFormView(id, expenseId, query)],
   [/^\/g\/(\d+)\/pago$/, ([id], query) => settlementFormView(id, query)],
   [/^\/g\/(\d+)\/ajustes$/, ([id]) => settingsView(id)],
   [/^\/personas$/, () => peopleView()],

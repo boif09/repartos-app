@@ -473,6 +473,96 @@ input:focus { border-color: var(--accent); }
 .exact-status.pending { color: var(--danger); }
 .card.stack > .list .row { padding-left: 0; padding-right: 0; }
 
+/* ---------- Formulario de gasto ---------- */
+
+.expense-form { gap: 16px; padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+.expense-form .amount-input { min-height: 68px !important; font-size: 34px !important; }
+
+/* Chip que abre un selector nativo (quién pagó, grupo, fecha). */
+.picker-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 4px 12px 4px 6px;
+  border: 1px solid var(--control);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text);
+}
+.picker-chip:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.picker-leading { display: inline-grid; place-items: center; min-width: 32px; color: var(--muted); }
+.picker-leading .avatar { width: 30px; height: 30px; font-size: 13px; }
+.picker-leading .group-icon { width: 30px; height: 30px; border-radius: 8px; }
+.picker-leading .group-icon .icon { width: 18px; height: 18px; }
+.picker-text { display: grid; line-height: 1.15; min-width: 0; }
+.picker-text strong { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-label { font-size: var(--fs-xs); color: var(--muted); }
+.picker-chip > .icon { color: var(--muted); }
+.picker-chip select, .picker-chip .chip-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* Lista única de personas: casilla, avatar, nombre y lo que le toca. */
+.person-row { min-height: 60px; cursor: pointer; }
+.person-row.off .avatar { opacity: .35; }
+.person-row.off .row-main strong { color: var(--muted); }
+.share-amount { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 500; color: var(--text); }
+.row-side .share-amount { font-size: var(--fs-xs); color: var(--muted); }
+.check {
+  appearance: none;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  border: 1.5px solid var(--control);
+  border-radius: 6px;
+  background: var(--surface);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.check:checked { background: var(--accent); border-color: var(--accent); }
+.check:checked::after {
+  content: "";
+  width: 6px;
+  height: 11px;
+  margin-top: -2px;
+  border: solid var(--accent-text);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.check:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Barra fija para guardar. */
+.action-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--line);
+}
+.action-bar .btn { max-width: 568px; margin: 0 auto; display: flex; min-height: 52px; font-size: var(--fs-lg); }
+.action-bar .btn, .action-bar .btn * { font-variant-numeric: tabular-nums; }
+
+.home-links { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+.home-links .btn { font-size: var(--fs-md); }
+
 /* ---------- Divisas ---------- */
 
 select {
@@ -508,7 +598,9 @@ select {
 .currency-select:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .field > .currency-select { justify-self: start; }
 .amount-row .currency-select { flex: none; min-height: 60px; font-size: var(--fs-lg); }
-.fx-box[hidden] { display: none; }
+.fx-box[hidden], .fx-box [hidden] { display: none; }
+.fx-box { gap: 8px; padding: 12px 16px; }
+.fx-box .link-btn { justify-self: start; }
 .fx-row { display: flex; gap: 12px; align-items: flex-end; justify-content: space-between; }
 .fx-rate { display: flex; align-items: center; gap: 6px; }
 .fx-unit { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; font-family: var(--mono); }
@@ -545,7 +637,7 @@ body.is-offline .fab, body.is-offline button[type="submit"] { opacity: .6; }
   position: fixed;
   left: 16px;
   right: 16px;
-  bottom: calc(88px + env(safe-area-inset-bottom));
+  bottom: calc(92px + env(safe-area-inset-bottom));
   z-index: 20;
   max-width: 560px;
   margin: 0 auto;

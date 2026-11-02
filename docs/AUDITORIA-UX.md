@@ -142,7 +142,7 @@ Ahora va descripción, importe, quién pagó y fecha. Lo natural en el móvil es
 | Fase | Contenido | Esfuerzo |
 |---|---|---|
 | **V1 · Sistema visual** ✅ | Dirección **B · Neutra precisa**: IBM Plex autoalojada, tokens de color medidos (AA y bordes 3:1), escala tipográfica, iconos SVG, avatares con iniciales. Incluye ya U5 (resumen "Judit te debe" + Saldar), U6, U10 y U11 | Medio |
-| **V2 · Flujo de gasto** | U1 a U4: barra fija, importe primero, lista única de personas, "Añadir gasto" desde el inicio | Medio |
+| **V2 · Flujo de gasto** ✅ | U1 a U4: barra fija con el importe, importe primero, chips de grupo, quién pagó y fecha, lista única de personas con su parte, "Añadir gasto" desde el inicio en el último grupo usado. "Me cobraron" plegado para que el formulario quepa en una pantalla | Medio |
 | **V3 · Saldos e inicio** | U5, U6, U9, U10, U11: saldo con persona y botón Saldar, pagos claros, total global | Bajo |
 | **V4 · Pulido** | U7, U8, U12, U13: guardado coherente, hojas propias, fecha compacta, iconos de grupo | Bajo |
 | *Opcional* | U14: categorías con icono | Medio |
