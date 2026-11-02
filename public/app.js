@@ -156,6 +156,8 @@ const ICONS = {
   plus: ['M12 5v14', 'M5 12h14'],
   swap: ['M7 7h11l-3-3', 'M17 17H6l3 3'],
   check: ['M20 6L9 17l-5-5'],
+  moon: ['M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'],
+  contrast: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 3v18', 'M12 7h4.5', 'M12 11h6.5', 'M12 15h6', 'M12 19h3'],
   down: ['M6 9l6 6 6-6'],
   calendar: ['M8 2v4', 'M16 2v4', 'M3 10h18', 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'],
   users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M22 21v-2a4 4 0 0 0-3-3.87', 'M16 3.13a4 4 0 0 1 0 7.75'],
@@ -343,6 +345,45 @@ function confirmSheet({ title, message, confirmLabel, danger = false }) {
   });
 }
 
+// Apariencia: automático (sigue al sistema), claro u oscuro. Se guarda en este dispositivo.
+const THEME_OPTIONS = [['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro']];
+
+function themeIcon() {
+  const theme = window.repartosTheme?.get() ?? 'auto';
+  return icon(theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'contrast');
+}
+
+function appearanceSheet(button) {
+  const dialog = el('dialog', { class: 'sheet', 'aria-labelledby': 'appearance-title' });
+  const close = () => {
+    dialog.close();
+    dialog.remove();
+  };
+  dialog.append(el('div', { class: 'sheet-body' },
+    el('h2', { id: 'appearance-title', text: 'Apariencia' }),
+    el('p', { class: 'muted', text: 'Automático sigue el modo claro u oscuro del móvil.' }),
+    segmented(THEME_OPTIONS, window.repartosTheme?.get() ?? 'auto', (value) => {
+      window.repartosTheme?.set(value);
+      button.replaceChildren(themeIcon());
+    }, 'Apariencia'),
+    el('button', { type: 'button', class: 'btn secondary block', text: 'Listo', onClick: close })));
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    close();
+  });
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) close();
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+function themeButton() {
+  const button = el('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Apariencia: claro u oscuro' }, themeIcon());
+  button.addEventListener('click', () => appearanceSheet(button));
+  return button;
+}
+
 function field(label, input, hint) {
   return el('label', { class: 'field' }, el('span', { class: 'field-label', text: label }), input, hint && el('span', { class: 'field-hint', text: hint }));
 }
@@ -390,7 +431,12 @@ async function groupsView() {
   };
 
   mount(
-    topbar({ title: 'Repartos' }),
+    topbar({
+      title: 'Repartos',
+      action: el('span', { class: 'topbar-actions' },
+        themeButton(),
+        el('a', { class: 'me-link', href: '#/personas', 'aria-label': 'Personas y saldos' }, avatar(session.person.id, session.person.name))),
+    }),
     el('section', { class: 'content' },
       summary,
       active.length

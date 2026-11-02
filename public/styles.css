@@ -27,6 +27,7 @@
   --danger: #c03a1f;
   --danger-text: #ffffff;
   --warning: #9a5b00;
+  --warning-text: #ffffff;
   --shadow: 0 1px 2px rgb(20 22 26 / 5%);
   --shadow-raised: 0 8px 24px rgb(43 63 214 / 28%);
 
@@ -47,8 +48,10 @@
   color-scheme: light;
 }
 
+/* Oscuro: si el sistema lo pide (modo automático) o si se elige a mano en la app.
+   data-theme lo pone theme.js antes de pintar; "light" fuerza claro aunque el sistema esté en oscuro. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0d0f12;
     --surface: #16191e;
     --surface-2: #1f232a;
@@ -64,10 +67,33 @@
     --danger: #ff7f61;
     --danger-text: #0d0f12;
     --warning: #f0b35a;
+    --warning-text: #1a1206;
     --shadow: none;
     --shadow-raised: 0 8px 24px rgb(0 0 0 / 45%);
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0d0f12;
+  --surface: #16191e;
+  --surface-2: #1f232a;
+  --text: #eceef2;
+  --muted: #9ba2ae;
+  --line: #272c34;
+  --control: #6f7784;
+  --accent: #8e9bff;
+  --accent-text: #0d0f12;
+  --accent-soft: #232a5c;
+  --positive: #4fc48c;
+  --negative: #ff7f61;
+  --danger: #ff7f61;
+  --danger-text: #0d0f12;
+  --warning: #f0b35a;
+  --warning-text: #1a1206;
+  --shadow: none;
+  --shadow-raised: 0 8px 24px rgb(0 0 0 / 45%);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -191,6 +217,8 @@ strong, b { font-weight: 600; }
 }
 .icon-btn:active { background: var(--surface-2); }
 .me-link { display: inline-grid; place-items: center; width: 44px; height: 44px; }
+.topbar-actions { display: flex; align-items: center; gap: 2px; }
+button.icon-btn { border: 0; background: none; cursor: pointer; font: inherit; }
 
 /* ---------- Contenido ---------- */
 
@@ -623,12 +651,11 @@ select {
   z-index: 30;
   padding: calc(4px + env(safe-area-inset-top)) 16px 4px;
   background: var(--warning);
-  color: #fff;
+  color: var(--warning-text);
   font-size: var(--fs-sm);
   font-weight: 600;
   text-align: center;
 }
-@media (prefers-color-scheme: dark) { .offline-banner { color: #1a1206; } }
 body.is-offline .app { padding-top: 26px; }
 body.is-offline .topbar { top: 26px; }
 body.is-offline .fab, body.is-offline button[type="submit"] { opacity: .6; }

@@ -2,10 +2,11 @@
 // - Archivos de la app: caché primero y se actualizan en segundo plano.
 // - Lecturas de la API: red primero; sin red, la última respuesta guardada (marcada como offline).
 // - Escrituras, enlaces de amigos y redirecciones de Authelia: nunca se guardan.
-const CACHE = 'repartos-v4';
+const CACHE = 'repartos-v5';
 const SHELL = [
   './',
   'app.js',
+  'theme.js',
   'styles.css',
   'manifest.webmanifest',
   'shared/money.js',
