@@ -12,6 +12,7 @@ test('las migraciones crean el esquema y fijan user_version', () => {
   assert.deepEqual(tableNames(db), [
     'expense_groups', 'expense_shares', 'expenses', 'fx_cache', 'group_members', 'people', 'settlements',
   ]);
+  assert.ok(db.prepare('PRAGMA table_info(fx_cache)').all().some((column) => column.name === 'published_on'));
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS.at(-1).version);
   assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
   db.close();

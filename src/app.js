@@ -6,6 +6,7 @@ import { openDatabase } from './database.js';
 import { parseUserList, resolveUser } from './auth.js';
 import { HttpError } from './errors.js';
 import { createRepository } from './repository.js';
+import { createFxService } from './fx.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
@@ -115,10 +116,12 @@ export function createApp(options = {}) {
   };
   const prefix = basePath === '/' ? '' : basePath;
   const repo = createRepository(db);
+  const fx = createFxService(db, options.fx);
 
   // [método, patrón, handler(ctx)] -> handler devuelve [status, body]. ctx = { params, body, me }.
   const routes = [
     ['GET', /^\/people$/, () => [200, { people: repo.listPeople() }]],
+    ['GET', /^\/fx$/, async ({ query }) => [200, await fx.getRate(query.get('from'), query.get('to'), query.get('date'))]],
     ['POST', /^\/people$/, ({ body }) => [200, { person: repo.findOrCreatePerson(body.name) }]],
     ['PATCH', /^\/people\/(\d+)$/, ({ params, body }) => [200, { person: repo.renamePerson(params[0], body.name) }]],
 
@@ -145,7 +148,7 @@ export function createApp(options = {}) {
     ['POST', /^\/settlements\/([\w-]+)\/restore$/, ({ params }) => [200, { settlement: repo.restoreSettlement(params[0]) }]],
   ];
 
-  async function handleApi(req, res, route) {
+  async function handleApi(req, res, route, query) {
     const method = req.method;
 
     // Las escrituras exigen JSON: un formulario de otra web no puede enviarlo sin CORS.
@@ -182,7 +185,7 @@ export function createApp(options = {}) {
       if (body === null || typeof body !== 'object' || Array.isArray(body)) {
         throw new HttpError(400, 'El cuerpo de la petición debe ser un objeto JSON.');
       }
-      const [status, payload] = handler({ params: match.slice(1), body, me });
+      const [status, payload] = await handler({ params: match.slice(1), body, me, query });
       return sendJson(res, status, payload);
     }
 
@@ -204,18 +207,20 @@ export function createApp(options = {}) {
 
       const relativePath = pathname.slice(prefix.length);
       if (relativePath === '/api' || relativePath.startsWith('/api/')) {
-        return await handleApi(req, res, relativePath.slice('/api'.length) || '/');
+        return await handleApi(req, res, relativePath.slice('/api'.length) || '/', url.searchParams);
       }
 
       if ((req.method === 'GET' || req.method === 'HEAD') && serveStatic(res, relativePath)) return;
       throw new HttpError(404, 'Ruta no encontrada.');
     } catch (error) {
-      const status = error.status || 500;
-      if (status >= 500) console.error(error);
+      // Los HttpError son intencionados y su mensaje es para la persona; el resto se oculta.
+      const expected = error instanceof HttpError;
+      const status = expected ? error.status : 500;
+      if (!expected) console.error(error);
       if (res.headersSent) return res.destroy();
       sendJson(res, status, {
-        error: status >= 500 ? 'Error interno del servidor.' : error.message,
-        ...(status < 500 && error.details ? error.details : {}),
+        error: expected ? error.message : 'Error interno del servidor.',
+        ...(expected && error.details ? error.details : {}),
       });
     }
   });

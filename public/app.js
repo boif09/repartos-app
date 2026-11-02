@@ -1,11 +1,19 @@
 // SPA vanilla con rutas por hash. Las rutas de red son relativas al documento, así la app
 // funciona bajo cualquier BASE_PATH. El login lo gestiona Authelia: si la sesión caduca,
 // nginx responde con una redirección y la app recarga la página para que el navegador la siga.
-import { allocate, centsToInput, formatMoney, parseAmount } from './shared/money.js';
+import { allocate, centsToInput, currencyExponent, formatMoney, parseAmount } from './shared/money.js';
+import { convertMinor, parseRate } from './shared/fx.js';
 import { computeShares, SplitError } from './shared/splits.js';
 
 const appEl = document.getElementById('app');
 const GROUP_EMOJIS = ['👥', '❤️', '🏠', '✈️', '🏖️', '⛰️', '🍻', '🎉'];
+// Monedas habituales. Las del BCE tienen tipo automático; el resto se escribe a mano.
+const CURRENCIES = [
+  'EUR', 'USD', 'GBP', 'CHF', 'JPY', 'CNY', 'THB', 'MXN', 'BRL', 'ARS', 'CLP', 'COP', 'PEN', 'CAD', 'AUD', 'NZD',
+  'SEK', 'NOK', 'DKK', 'ISK', 'PLN', 'CZK', 'HUF', 'RON', 'TRY', 'MAD', 'EGP', 'AED', 'INR', 'IDR', 'VND', 'KRW',
+  'SGD', 'HKD', 'PHP', 'MYR', 'ZAR', 'ILS',
+];
+const currencyNames = new Intl.DisplayNames('es', { type: 'currency' });
 
 let session = null;
 let renderToken = 0;
@@ -107,6 +115,32 @@ function handleError(error) {
   toast(error.message || 'Algo ha fallado.');
 }
 
+function currencySymbol(currency) {
+  return new Intl.NumberFormat('es-ES', { style: 'currency', currency, currencyDisplay: 'narrowSymbol' })
+    .formatToParts(0).find((part) => part.type === 'currency')?.value ?? currency;
+}
+
+// Cerrado muestra solo el código (JPY); al abrirlo, la lista nativa muestra también el nombre.
+function currencySelect(current, onChange, { disabled = false } = {}) {
+  const codes = CURRENCIES.includes(current) ? CURRENCIES : [current, ...CURRENCIES];
+  const shown = el('span', { class: 'currency-code', text: current });
+  const select = el('select', {
+    'aria-label': 'Moneda',
+    disabled,
+    onChange: () => {
+      shown.textContent = select.value;
+      onChange(select.value);
+    },
+  }, codes.map((code) => el('option', { value: code, text: `${code} · ${currencyNames.of(code)}` })));
+  select.value = current;
+  return el('span', { class: `currency-select${disabled ? ' disabled' : ''}` }, shown, el('span', { class: 'chevron', 'aria-hidden': 'true', text: '▾' }), select);
+}
+
+// La moneda del último gasto del grupo: en un viaje, lo normal es seguir pagando en la misma.
+function lastCurrency(bundle) {
+  return bundle.expenses[0]?.currency ?? null;
+}
+
 function plural(count, one, many) {
   return `${count} ${count === 1 ? one : many}`;
 }
@@ -116,10 +150,10 @@ function personName(people, id) {
   return people.get(id)?.name ?? '¿?';
 }
 
-function balanceText(cents) {
+function balanceText(cents, currency = 'EUR') {
   if (cents === null || cents === undefined) return { text: 'No participas', tone: 'muted' };
-  if (cents > 0) return { text: `Te deben ${formatMoney(cents)}`, tone: 'positive' };
-  if (cents < 0) return { text: `Debes ${formatMoney(-cents)}`, tone: 'negative' };
+  if (cents > 0) return { text: `Te deben ${formatMoney(cents, currency)}`, tone: 'positive' };
+  if (cents < 0) return { text: `Debes ${formatMoney(-cents, currency)}`, tone: 'negative' };
   return { text: 'Estás en paz', tone: 'muted' };
 }
 
@@ -187,7 +221,7 @@ async function groupsView() {
   const archived = groups.filter((group) => group.archived);
 
   const card = (group) => {
-    const balance = balanceText(group.myBalanceCents);
+    const balance = balanceText(group.myBalanceCents, group.baseCurrency);
     return el('a', { class: 'card group-card', href: `#/g/${group.id}` },
       el('span', { class: 'group-emoji', 'aria-hidden': 'true', text: group.emoji || '👥' }),
       el('span', { class: 'group-main' },
@@ -214,6 +248,7 @@ async function newGroupView() {
   const { people } = await api('people');
   const selected = new Map(); // key -> { personId } | { name }
   let emoji = GROUP_EMOJIS[0];
+  let baseCurrency = 'EUR';
 
   const title = el('input', { type: 'text', maxLength: 60, required: true, placeholder: 'Pareja, Japón 2027, Finde Cerdanya…', autocomplete: 'off' });
   const peopleChips = el('div', { class: 'chips' });
@@ -263,7 +298,7 @@ async function newGroupView() {
       }
       submit.disabled = true;
       try {
-        const bundle = await api('groups', { method: 'POST', body: { title: title.value, emoji, members: [...selected.values()] } });
+        const bundle = await api('groups', { method: 'POST', body: { title: title.value, emoji, baseCurrency, members: [...selected.values()] } });
         navigate(`#/g/${bundle.group.id}`, { replace: true });
       } catch (error) {
         handleError(error);
@@ -273,6 +308,8 @@ async function newGroupView() {
   },
   field('Nombre', title),
   field('Icono', emojiPicker(emoji, (value) => { emoji = value; })),
+  field('Moneda de las cuentas', currencySelect(baseCurrency, (value) => { baseCurrency = value; }),
+    'Los saldos se calculan en esta moneda. En un viaje puedes dejar euros y apuntar cada gasto en la moneda local.'),
   el('div', { class: 'field' },
     el('span', { class: 'field-label', text: 'Personas' }),
     el('span', { class: 'field-hint', text: `${session.person.name} ya está incluido. Toca para añadir.` }),
@@ -297,6 +334,7 @@ function timeline(bundle, people) {
   }
 
   const meId = session.person.id;
+  const cur = bundle.group.baseCurrency;
   const list = el('div', { class: 'timeline' });
   let currentDay = null;
   for (const item of items) {
@@ -308,8 +346,8 @@ function timeline(bundle, people) {
       const expense = item.data;
       const myShare = expense.shares.find((share) => share.personId === meId)?.owedCents ?? 0;
       let impact;
-      if (expense.payerId === meId) impact = { text: `prestaste ${formatMoney(expense.amountCents - myShare)}`, tone: 'positive' };
-      else if (myShare > 0) impact = { text: `debes ${formatMoney(myShare)}`, tone: 'negative' };
+      if (expense.payerId === meId) impact = { text: `prestaste ${formatMoney(expense.amountCents - myShare, cur)}`, tone: 'positive' };
+      else if (myShare > 0) impact = { text: `debes ${formatMoney(myShare, cur)}`, tone: 'negative' };
       else impact = { text: 'no participas', tone: 'muted' };
       list.append(el('a', {
         class: 'row',
@@ -319,7 +357,8 @@ function timeline(bundle, people) {
         el('strong', { text: expense.description }),
         el('span', { class: 'muted small', text: `${expense.payerId === meId ? 'Pagaste' : `Pagó ${personName(people, expense.payerId)}`} · ${splitSummary(expense, bundle.members.length)}` })),
       el('span', { class: 'row-side' },
-        el('strong', { text: formatMoney(expense.amountCents) }),
+        el('strong', { text: formatMoney(expense.originalMinor, expense.currency) }),
+        expense.currency !== cur && el('span', { class: 'muted small', text: `≈ ${formatMoney(expense.amountCents, cur)}` }),
         el('span', { class: `small ${impact.tone}`, text: impact.text }))));
     } else {
       const settlement = item.data;
@@ -332,14 +371,14 @@ function timeline(bundle, people) {
       el('span', { class: 'row-main' },
         el('strong', { text: `${personName(people, settlement.fromId)} → ${personName(people, settlement.toId)}` }),
         el('span', { class: 'muted small', text: 'Pago' })),
-      el('span', { class: 'row-side' }, el('strong', { text: formatMoney(settlement.amountCents) }))));
+      el('span', { class: 'row-side' }, el('strong', { text: formatMoney(settlement.amountCents, cur) }))));
     }
   }
   return list;
 }
 
 async function deleteSettlement(bundle, settlement, people) {
-  const label = `${personName(people, settlement.fromId)} → ${personName(people, settlement.toId)} (${formatMoney(settlement.amountCents)})`;
+  const label = `${personName(people, settlement.fromId)} → ${personName(people, settlement.toId)} (${formatMoney(settlement.amountCents, bundle.group.baseCurrency)})`;
   if (!window.confirm(`¿Borrar el pago ${label}?`)) return;
   try {
     await api(`settlements/${settlement.id}`, { method: 'DELETE' });
@@ -360,6 +399,7 @@ function balancesPanel(bundle, people) {
   const groupId = bundle.group.id;
   const writable = !bundle.group.archived;
   const balances = [...bundle.balances].sort((a, b) => b.amountCents - a.amountCents);
+  const cur = bundle.group.baseCurrency;
 
   return el('div', { class: 'stack' },
     el('div', { class: 'card list' },
@@ -367,7 +407,7 @@ function balancesPanel(bundle, people) {
         el('span', { class: 'row-main' }, el('strong', { text: personName(people, personId) })),
         el('span', {
           class: `amount ${amountCents > 0 ? 'positive' : amountCents < 0 ? 'negative' : 'muted'}`,
-          text: amountCents > 0 ? `+${formatMoney(amountCents)}` : amountCents < 0 ? formatMoney(amountCents) : 'En paz',
+          text: amountCents > 0 ? `+${formatMoney(amountCents, cur)}` : amountCents < 0 ? formatMoney(amountCents, cur) : 'En paz',
         })))),
     el('h2', { class: 'section-title', text: bundle.group.simplifyDebts ? 'Pagos sugeridos' : 'Deudas' }),
     bundle.transfers.length
@@ -375,7 +415,7 @@ function balancesPanel(bundle, people) {
         bundle.transfers.map((transfer) => el('div', { class: 'row static' },
           el('span', { class: 'row-main' },
             el('strong', { text: `${personName(people, transfer.fromId)} → ${personName(people, transfer.toId)}` }),
-            el('span', { class: 'muted small', text: formatMoney(transfer.amountCents) })),
+            el('span', { class: 'muted small', text: formatMoney(transfer.amountCents, cur) })),
           writable && el('a', {
             class: 'btn small secondary',
             href: `#/g/${groupId}/pago?from=${transfer.fromId}&to=${transfer.toId}&amount=${transfer.amountCents}`,
@@ -388,7 +428,7 @@ function balancesPanel(bundle, people) {
 async function groupView(groupId, tab) {
   const bundle = await api(`groups/${groupId}`);
   const people = new Map(bundle.members.map((person) => [person.id, person]));
-  const balance = balanceText(bundle.myBalanceCents);
+  const balance = balanceText(bundle.myBalanceCents, bundle.group.baseCurrency);
   const base = `#/g/${groupId}`;
 
   mount(
@@ -482,13 +522,23 @@ async function expenseFormView(groupId, expenseId) {
   const memberLabel = (member) => (member.id === meId ? `${member.name} (tú)` : member.name);
   let payerId = editing?.payerId ?? (people.has(meId) ? meId : members[0]?.id);
 
+  // Moneda: la del grupo (base) o la del gasto. Los saldos siempre van en la del grupo.
+  const base = bundle.group.baseCurrency;
+  const baseExp = currencyExponent(base);
+  let currency = editing?.currency ?? lastCurrency(bundle) ?? base;
+  const exp = () => currencyExponent(currency);
+  // Origen del tipo escrito en el campo: BCE o a mano. Lo de la tarjeta va aparte, en cardInput.
+  let fxSource = editing?.fxSource === 'manual' ? 'manual' : 'ecb';
+  let fxDate = null;
+  let fxRequest = 0;
+
   // Cada modo guarda su propio estado: cambiar de modo y volver no pierde lo escrito.
   const defaultSplit = new Map((bundle.group.defaultSplit || []).map((entry) => [entry.personId, entry.weight]));
   const editedShare = (personId) => editing?.shares.find((share) => share.personId === personId);
   let mode = editing?.splitMode ?? (bundle.group.defaultSplit ? 'shares' : 'equal');
   const participants = new Set(editing ? editing.shares.map((share) => share.personId) : members.map((member) => member.id));
   const exactInputs = new Map(members.map((member) => [member.id,
-    editing?.splitMode === 'exact' && editedShare(member.id) ? centsToInput(editedShare(member.id).inputValue) : '']));
+    editing?.splitMode === 'exact' && editedShare(member.id) ? centsToInput(editedShare(member.id).inputValue, exp()) : '']));
   const weights = new Map(members.map((member) => {
     if (editing?.splitMode === 'shares') return [member.id, editedShare(member.id)?.inputValue ?? 0];
     if (bundle.group.defaultSplit) return [member.id, defaultSplit.get(member.id) ?? 0];
@@ -496,12 +546,127 @@ async function expenseFormView(groupId, expenseId) {
   }));
 
   const description = el('input', { type: 'text', maxLength: 120, placeholder: 'Cena, gasolina, súper…', autocomplete: 'off', value: editing?.description ?? '' });
-  const amount = el('input', { type: 'text', inputMode: 'decimal', placeholder: '0,00', autocomplete: 'off', class: 'amount-input', value: editing ? centsToInput(editing.amountCents) : '' });
+  const amount = el('input', {
+    type: 'text', inputMode: 'decimal', placeholder: '0,00', autocomplete: 'off', class: 'amount-input',
+    value: editing ? centsToInput(editing.originalMinor, exp()) : '',
+  });
+  // Al cambiar de moneda se conserva la cifra escrita (3.500 sigue siendo 3.500), adaptada a los
+  // decimales de la nueva; lo que depende de la moneda anterior (tarjeta y tipo) se vuelve a pedir.
+  const currencyInput = currencySelect(currency, (value) => {
+    const previousExp = exp();
+    currency = value;
+    const reformat = (text) => {
+      const parsed = parseAmount(text, previousExp);
+      if (parsed === null) return text;
+      const units = parsed / 10 ** previousExp;
+      return Number.isInteger(units * 10 ** exp()) ? centsToInput(Math.round(units * 10 ** exp()), exp()) : text;
+    };
+    amount.value = reformat(amount.value);
+    for (const [personId, text] of exactInputs) exactInputs.set(personId, text.trim() ? reformat(text) : text);
+    cardInput.value = '';
+    rateInput.value = '';
+    fxSource = 'ecb';
+    fxDate = null;
+    renderFx();
+    renderSplitBody();
+    refreshRate();
+  });
   const date = el('input', { type: 'date', value: editing?.spentOn ?? todayIso(), max: '2100-12-31' });
+  const rateInput = el('input', { type: 'text', inputMode: 'decimal', autocomplete: 'off', class: 'rate-input', value: editing?.fxRate ?? '' });
+  const cardInput = el('input', {
+    type: 'text', inputMode: 'decimal', autocomplete: 'off', placeholder: 'Opcional',
+    value: editing?.fxSource === 'card' ? centsToInput(editing.amountCents, baseExp) : '',
+  });
+  const fxBox = el('div', { class: 'card stack fx-box' });
+  const fxHint = el('span', { class: 'field-hint' });
+  const fxUnit = el('span', { class: 'fx-unit' });
+  const converted = el('strong', { class: 'converted' });
   const splitBody = el('div', { class: 'stack' });
   const preview = el('div', { class: 'card list preview' });
   const status = el('p', { class: 'form-status', role: 'status' });
   const exactStatus = el('p', { class: 'exact-status', role: 'status' });
+
+  const originalTotal = () => parseAmount(amount.value, exp());
+
+  // Importe en la moneda del grupo: igual, por tipo de cambio o lo que cobró la tarjeta.
+  function baseTotal() {
+    const original = originalTotal();
+    if (!original) return null;
+    if (currency === base) return original;
+    if (cardInput.value.trim()) return parseAmount(cardInput.value, baseExp);
+    const rate = parseRate(rateInput.value);
+    if (!rate) return null;
+    const value = convertMinor(original, rate, exp(), baseExp);
+    return value > 0 ? value : null;
+  }
+
+  function renderFx() {
+    fxBox.hidden = currency === base;
+    fxUnit.textContent = `1 ${currency} =`;
+    amount.placeholder = exp() === 0 ? '0' : '0,00';
+    updateConverted();
+  }
+
+  function updateConverted() {
+    if (currency === base) return;
+    const total = baseTotal();
+    converted.textContent = total ? `≈ ${formatMoney(total, base)}` : '';
+    if (cardInput.value.trim()) fxHint.textContent = 'Se usará lo que cobró la tarjeta.';
+    else if (fxSource === 'ecb' && fxDate) fxHint.textContent = `Tipo del BCE del ${dayYearFormat.format(new Date(`${fxDate}T12:00:00`))}. Puedes cambiarlo.`;
+    else if (fxSource === 'ecb' && editing?.fxSource === 'ecb' && rateInput.value) fxHint.textContent = 'Tipo del BCE guardado con el gasto.';
+    else if (fxSource === 'manual') fxHint.textContent = 'Tipo escrito a mano.';
+  }
+
+  async function refreshRate() {
+    if (currency === base || fxSource === 'manual') return;
+    const request = ++fxRequest;
+    const asked = { currency, date: date.value || todayIso() };
+    const stale = () => request !== fxRequest || asked.currency !== currency || asked.date !== (date.value || todayIso());
+    fxHint.textContent = 'Consultando el tipo de cambio…';
+    try {
+      const result = await api(`fx?from=${asked.currency}&to=${base}&date=${asked.date}`);
+      if (stale()) return;
+      rateInput.value = result.rate.replace('.', ',');
+      fxSource = 'ecb';
+      fxDate = result.date;
+    } catch (error) {
+      if (error instanceof SessionExpiredError) return handleError(error);
+      if (stale()) return;
+      fxSource = 'manual';
+      fxDate = null;
+      fxHint.textContent = error.message;
+      rateInput.focus();
+    }
+    updateConverted();
+    updatePreview();
+  }
+
+  rateInput.addEventListener('input', () => {
+    fxRequest += 1; // descarta cualquier consulta al BCE en curso
+    fxSource = 'manual';
+    fxDate = null;
+    updateConverted();
+    updatePreview();
+  });
+  cardInput.addEventListener('input', () => {
+    // Si se borra lo de la tarjeta y no hay tipo escrito, se pide el del BCE.
+    if (!cardInput.value.trim() && !parseRate(rateInput.value)) refreshRate();
+    updateConverted();
+    updatePreview();
+  });
+  date.addEventListener('change', () => refreshRate());
+
+  fxBox.append(
+    el('div', { class: 'fx-row' },
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label', text: 'Tipo de cambio' }),
+        el('span', { class: 'fx-rate' }, fxUnit, rateInput, el('span', { class: 'fx-unit', text: base }))),
+      converted),
+    fxHint,
+    el('label', { class: 'field' },
+      el('span', { class: 'field-label', text: `Me cobraron (${currencySymbol(base)})` }),
+      cardInput,
+      el('span', { class: 'field-hint', text: 'Si lo pagaste con tarjeta, pon lo que te cargó el banco y se usará eso.' })));
 
   // Devuelve { entries } listo para la API, o { error } con un mensaje para la persona.
   function currentEntries() {
@@ -517,9 +682,9 @@ async function expenseFormView(groupId, expenseId) {
     for (const member of members) {
       const text = exactInputs.get(member.id).trim();
       if (!text) continue;
-      const cents = parseAmount(text);
-      if (cents === null) return { error: `Importe no válido para ${member.name}.` };
-      if (cents > 0) entries.push({ personId: member.id, value: cents });
+      const value = parseAmount(text, exp());
+      if (value === null) return { error: `Importe no válido para ${member.name}.` };
+      if (value > 0) entries.push({ personId: member.id, value });
     }
     return entries.length ? { entries } : { error: 'Escribe el importe de al menos una persona.' };
   }
@@ -529,20 +694,25 @@ async function expenseFormView(groupId, expenseId) {
     status.textContent = '';
     exactStatus.textContent = '';
     exactStatus.className = 'exact-status';
-    const total = parseAmount(amount.value);
+    const original = originalTotal();
+    const total = baseTotal();
     const { entries, error } = currentEntries();
+    if (!original && amount.value.trim()) {
+      status.textContent = exp() === 0 ? `Importe no válido: ${currency} no usa decimales.` : 'Importe no válido.';
+      return;
+    }
 
     if (mode === 'exact') {
       const assigned = (entries || []).reduce((sum, entry) => sum + entry.value, 0);
-      if (total) {
-        const diff = total - assigned;
+      if (original) {
+        const diff = original - assigned;
         exactStatus.textContent = diff === 0
-          ? `Asignado ${formatMoney(assigned)} de ${formatMoney(total)} ✓`
-          : `Asignado ${formatMoney(assigned)} de ${formatMoney(total)} · ${diff > 0 ? 'faltan' : 'sobran'} ${formatMoney(Math.abs(diff))}`;
+          ? `Asignado ${formatMoney(assigned, currency)} de ${formatMoney(original, currency)} ✓`
+          : `Asignado ${formatMoney(assigned, currency)} de ${formatMoney(original, currency)} · ${diff > 0 ? 'faltan' : 'sobran'} ${formatMoney(Math.abs(diff), currency)}`;
         exactStatus.classList.add(diff === 0 ? 'ok' : 'pending');
       }
       if (error && assigned > 0) status.textContent = error;
-      return;
+      if (error || !total || assigned !== original || currency === base) return;
     }
     if (error) {
       status.textContent = error;
@@ -550,10 +720,10 @@ async function expenseFormView(groupId, expenseId) {
     }
     if (!total) return;
     try {
-      for (const share of computeShares({ totalCents: total, mode, entries, seed: id })) {
+      for (const share of computeShares({ totalCents: total, mode, entries, seed: id, originalTotal: original })) {
         preview.append(el('div', { class: 'row static' },
           el('span', { class: 'row-main', text: personName(people, share.personId) }),
-          el('span', { class: 'amount', text: formatMoney(share.owedCents) })));
+          el('span', { class: 'amount', text: formatMoney(share.owedCents, base) })));
       }
     } catch (splitError) {
       if (splitError instanceof SplitError) status.textContent = splitError.message;
@@ -564,7 +734,7 @@ async function expenseFormView(groupId, expenseId) {
   // "Repartir lo que falta": la propina o lo compartido, a partes iguales entre quienes ya
   // tienen importe (o entre todos si nadie lo tiene todavía).
   function fillRemaining() {
-    const total = parseAmount(amount.value);
+    const total = originalTotal();
     if (!total) return toast('Escribe primero el importe total.');
     const { entries, error } = currentEntries();
     if (error && (entries || []).length) return toast(error);
@@ -574,8 +744,8 @@ async function expenseFormView(groupId, expenseId) {
     const targets = entries?.length ? entries.map((entry) => entry.personId) : members.map((member) => member.id);
     const extra = allocate(remaining, targets.map(() => 1), id);
     targets.forEach((personId, index) => {
-      const current = parseAmount(exactInputs.get(personId)) || 0;
-      exactInputs.set(personId, centsToInput(current + extra[index]));
+      const current = parseAmount(exactInputs.get(personId), exp()) || 0;
+      exactInputs.set(personId, centsToInput(current + extra[index], exp()));
     });
     renderSplitBody();
   }
@@ -610,13 +780,13 @@ async function expenseFormView(groupId, expenseId) {
         chips);
     } else if (mode === 'exact') {
       splitBody.append(
-        el('span', { class: 'field-hint', text: 'Lo que le toca a cada uno. Vacío = no participa.' }),
+        el('span', { class: 'field-hint', text: `Lo que le toca a cada uno, en ${currencySymbol(currency)}. Vacío = no participa.` }),
         el('div', { class: 'card list' },
           members.map((member) => {
             const input = el('input', {
               type: 'text',
               inputMode: 'decimal',
-              placeholder: '0,00',
+              placeholder: exp() === 0 ? '0' : '0,00',
               autocomplete: 'off',
               class: 'share-input',
               value: exactInputs.get(member.id),
@@ -644,7 +814,10 @@ async function expenseFormView(groupId, expenseId) {
     updatePreview();
   }
 
-  amount.addEventListener('input', updatePreview);
+  amount.addEventListener('input', () => {
+    updateConverted();
+    updatePreview();
+  });
 
   const submit = el('button', { class: 'btn primary', type: 'submit', text: editing ? 'Guardar cambios' : 'Añadir gasto' });
   const form = el('form', {
@@ -652,16 +825,30 @@ async function expenseFormView(groupId, expenseId) {
     novalidate: true,
     onSubmit: async (event) => {
       event.preventDefault();
-      const cents = parseAmount(amount.value);
+      const original = originalTotal();
       if (!description.value.trim()) return (description.focus(), toast('Falta la descripción.'));
-      if (!cents) return (amount.focus(), toast('Importe no válido.'));
+      if (!original) return (amount.focus(), toast('Importe no válido.'));
       const { entries, error } = currentEntries();
       if (error) return toast(error);
       if (mode === 'exact') {
         const assigned = entries.reduce((sum, entry) => sum + entry.value, 0);
-        if (assigned !== cents) return toast(`Los importes suman ${formatMoney(assigned)} y el gasto es de ${formatMoney(cents)}.`);
+        if (assigned !== original) return toast(`Los importes suman ${formatMoney(assigned, currency)} y el gasto es de ${formatMoney(original, currency)}.`);
       }
-      const body = { id, description: description.value, amountCents: cents, payerId, spentOn: date.value, splitMode: mode, shares: entries };
+      const body = { id, description: description.value, payerId, spentOn: date.value, splitMode: mode, shares: entries, currency };
+      if (currency === base) {
+        body.amountCents = original;
+      } else {
+        body.originalMinor = original;
+        if (cardInput.value.trim()) {
+          const card = parseAmount(cardInput.value, baseExp);
+          if (!card) return (cardInput.focus(), toast('Importe cobrado no válido.'));
+          Object.assign(body, { fxSource: 'card', amountCents: card });
+        } else {
+          const rate = parseRate(rateInput.value);
+          if (!rate) return (rateInput.focus(), toast('Escribe el tipo de cambio.'));
+          Object.assign(body, { fxSource, fxRate: rate });
+        }
+      }
       submit.disabled = true;
       try {
         if (editing) await api(`expenses/${id}`, { method: 'PUT', body: { ...body, version: editing.version } });
@@ -680,7 +867,10 @@ async function expenseFormView(groupId, expenseId) {
     },
   },
   field('Descripción', description),
-  field('Importe (€)', amount),
+  el('div', { class: 'field' },
+    el('span', { class: 'field-label', text: 'Importe' }),
+    el('div', { class: 'amount-row' }, amount, currencyInput)),
+  fxBox,
   el('div', { class: 'field' },
     el('span', { class: 'field-label', text: 'Pagó' }),
     el('div', { class: 'chips', role: 'radiogroup' },
@@ -724,7 +914,10 @@ async function expenseFormView(groupId, expenseId) {
   }));
 
   mount(topbar({ title: editing ? 'Editar gasto' : 'Nuevo gasto', back: `#/g/${groupId}` }), form);
+  renderFx();
   renderSplitBody();
+  // Gasto nuevo en moneda extranjera: se pide ya el tipo del día.
+  if (!editing) refreshRate();
   if (!editing) description.focus();
 }
 
@@ -737,8 +930,10 @@ async function settlementFormView(groupId, query) {
   let fromId = Number(query.get('from')) || null;
   let toId = Number(query.get('to')) || null;
   const suggested = Number(query.get('amount')) || null;
+  const cur = bundle.group.baseCurrency;
+  const curExp = currencyExponent(cur);
 
-  const amount = el('input', { type: 'text', inputMode: 'decimal', placeholder: '0,00', class: 'amount-input', autocomplete: 'off', value: suggested ? centsToInput(suggested) : '' });
+  const amount = el('input', { type: 'text', inputMode: 'decimal', placeholder: curExp ? '0,00' : '0', class: 'amount-input', autocomplete: 'off', value: suggested ? centsToInput(suggested, curExp) : '' });
   const date = el('input', { type: 'date', value: todayIso(), max: '2100-12-31' });
   const personChips = (selectedId, onPick) => el('div', { class: 'chips', role: 'radiogroup' },
     members.map((member) => chip({ label: personName(people, member.id), selected: member.id === selectedId, role: 'radio', onToggle: () => onPick(member.id) })));
@@ -749,7 +944,7 @@ async function settlementFormView(groupId, query) {
     novalidate: true,
     onSubmit: async (event) => {
       event.preventDefault();
-      const cents = parseAmount(amount.value);
+      const cents = parseAmount(amount.value, curExp);
       if (!fromId || !toId) return toast('Elige quién paga y quién recibe.');
       if (fromId === toId) return toast('Quien paga y quien recibe no pueden ser la misma persona.');
       if (!cents) return (amount.focus(), toast('Importe no válido.'));
@@ -772,7 +967,7 @@ async function settlementFormView(groupId, query) {
   },
   el('div', { class: 'field' }, el('span', { class: 'field-label', text: 'Paga' }), personChips(fromId, (value) => { fromId = value; })),
   el('div', { class: 'field' }, el('span', { class: 'field-label', text: 'Recibe' }), personChips(toId, (value) => { toId = value; })),
-  field('Importe (€)', amount, suggested ? 'Puedes cambiarlo si es un pago parcial.' : undefined),
+  field(`Importe (${currencySymbol(cur)})`, amount, suggested ? 'Puedes cambiarlo si es un pago parcial.' : undefined),
   field('Fecha', date),
   submit);
 
@@ -866,6 +1061,9 @@ async function settingsView(groupId) {
     el('section', { class: 'content form' },
       field('Nombre', title),
       writable && field('Icono', emojiPicker(emoji, (value) => { emoji = value; })),
+      field('Moneda de las cuentas', currencySelect(group.baseCurrency, (value) => patch({ baseCurrency: value }, `Moneda del grupo: ${value}`),
+        { disabled: !writable || bundle.expenses.length > 0 || bundle.settlements.length > 0 }),
+      bundle.expenses.length || bundle.settlements.length ? 'No se puede cambiar cuando ya hay gastos o pagos.' : undefined),
       writable && el('button', { type: 'button', class: 'btn secondary block', text: 'Guardar nombre e icono', onClick: () => patch({ title: title.value, emoji }, 'Grupo actualizado') }),
 
       el('label', { class: 'card switch-row' },

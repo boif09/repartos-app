@@ -1,20 +1,46 @@
-// Dinero siempre en enteros (céntimos). Este módulo lo usan servidor y navegador.
+// Dinero siempre en enteros, en la unidad menor de cada divisa (céntimos de euro, yenes…).
+// Este módulo lo usan servidor y navegador.
 
-export const MAX_CENTS = 1_000_000_000; // 10 millones de euros
+export const MAX_CENTS = 1_000_000_000; // 10 millones de euros (o 1.000 millones de yenes)
 
 const formatters = new Map();
+const exponents = new Map();
 
-export function formatMoney(cents, currency = 'EUR') {
-  if (!formatters.has(currency)) {
-    formatters.set(currency, new Intl.NumberFormat('es-ES', { style: 'currency', currency }));
+// Decimales de la divisa: EUR 2, JPY 0, KWD 3. Sale de Intl, igual en Node y en el navegador.
+export function currencyExponent(currency = 'EUR') {
+  if (!exponents.has(currency)) {
+    exponents.set(currency, new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits);
   }
-  return formatters.get(currency).format(cents / 100);
+  return exponents.get(currency);
 }
 
-// Convierte lo que escribe una persona ("12,5", "1.234,56", "12.50 €") a céntimos.
-// Devuelve null si no es un importe válido. Nunca pasa por float.
-export function parseAmount(text) {
-  let value = String(text ?? '').replace(/[\s€]/g, '');
+export function isCurrencyCode(value) {
+  if (!/^[A-Z]{3}$/.test(String(value ?? ''))) return false;
+  try {
+    currencyExponent(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Símbolo corto (¥, £, $) salvo que sea ambiguo: el "$" solo para el dólar; MXN o ARS van con su código.
+function moneyFormatter(currency) {
+  const options = { style: 'currency', currency, useGrouping: 'always' };
+  const narrow = new Intl.NumberFormat('es-ES', { ...options, currencyDisplay: 'narrowSymbol' });
+  const symbol = narrow.formatToParts(0).find((part) => part.type === 'currency')?.value;
+  return symbol === '$' && currency !== 'USD' ? new Intl.NumberFormat('es-ES', { ...options, currencyDisplay: 'code' }) : narrow;
+}
+
+export function formatMoney(minor, currency = 'EUR') {
+  if (!formatters.has(currency)) formatters.set(currency, moneyFormatter(currency));
+  return formatters.get(currency).format(minor / 10 ** currencyExponent(currency));
+}
+
+// Convierte lo que escribe una persona ("12,5", "1.234,56", "12.50 €") a unidades menores
+// de una divisa con `exponent` decimales. Devuelve null si no es válido. Nunca pasa por float.
+export function parseAmount(text, exponent = 2) {
+  let value = String(text ?? '').replace(/[\s€$£¥]/g, '');
   if (!value) return null;
 
   const lastComma = value.lastIndexOf(',');
@@ -26,21 +52,23 @@ export function parseAmount(text) {
     value = value.split(thousands).join('').replace(decimal, '.');
   } else if (lastComma >= 0) {
     value = value.replace(',', '.');
-  } else if (/^\d{1,3}(\.\d{3})+$/.test(value)) {
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(value) && exponent < 3) {
     value = value.split('.').join(''); // "1.234" en notación española
   }
 
-  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value);
-  if (!match) return null;
-  const cents = Number(match[1]) * 100 + Number((match[2] || '').padEnd(2, '0'));
-  return Number.isSafeInteger(cents) && cents <= MAX_CENTS ? cents : null;
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  if (!match || (match[2] && match[2].length > exponent)) return null;
+  const minor = Number(match[1]) * 10 ** exponent + Number((match[2] || '').padEnd(exponent, '0') || 0);
+  return Number.isSafeInteger(minor) && minor <= MAX_CENTS ? minor : null;
 }
 
-// Para rellenar un campo de texto con un importe existente: 1250 -> "12,50".
-export function centsToInput(cents) {
-  const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(cents);
-  return `${sign}${Math.floor(abs / 100)},${String(abs % 100).padStart(2, '0')}`;
+// Para rellenar un campo de texto con un importe existente: 1250 -> "12,50"; en JPY 3500 -> "3500".
+export function centsToInput(minor, exponent = 2) {
+  const sign = minor < 0 ? '-' : '';
+  const abs = Math.abs(minor);
+  if (exponent === 0) return `${sign}${abs}`;
+  const factor = 10 ** exponent;
+  return `${sign}${Math.floor(abs / factor)},${String(abs % factor).padStart(exponent, '0')}`;
 }
 
 function hashSeed(seed) {

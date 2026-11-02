@@ -92,6 +92,14 @@ export const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 2,
+    name: 'fecha de publicación en la caché de tipos de cambio',
+    sql: `
+      -- El BCE no publica en fines de semana ni festivos: el tipo de un domingo es el del viernes.
+      ALTER TABLE fx_cache ADD COLUMN published_on TEXT;
+    `,
+  },
 ];
 
 export function openDatabase(options = {}) {

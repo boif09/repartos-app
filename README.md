@@ -11,7 +11,7 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 | F0 | Esqueleto, login con Authelia, migraciones, tests, pm2/nginx de ejemplo | ✅ |
 | F1 | Personas, grupos, gastos a partes iguales (entre todos o algunos), saldos, pagos sugeridos, liquidaciones | ✅ |
 | F2 | Importes exactos (con "repartir lo que falta"), partes y reparto por defecto del grupo | ✅ |
-| F3 | Divisas | Pendiente |
+| F3 | Moneda por grupo y por gasto, tipo del BCE (Frankfurter) con caché, tipo manual y "me cobraron" | ✅ |
 | F4 | PWA, offline de lectura, enlace para amigos | Pendiente |
 | F5 | Despliegue y backups | Pendiente |
 
@@ -52,6 +52,7 @@ npm test
 | `HOST` | `127.0.0.1` | Dirección de escucha. Debe ser local: la app confía en nginx |
 | `BASE_PATH` | `/` | Ruta pública (la app vive en la raíz de `repartos.jusboif.es`) |
 | `DB_PATH` | `data/repartos.db` | Base de datos SQLite |
+| `FX_API_URL` | `https://api.frankfurter.dev/v1` | API de tipos de cambio del BCE |
 | `NODE_ENV` | — | `production` exige `APP_USERS` y prohíbe `DEV_REMOTE_USER` |
 
 ## Login y seguridad
@@ -83,6 +84,7 @@ server.js            Arranque y validación de configuración
 src/app.js           Router HTTP, estáticos, cabeceras de seguridad, API
 src/auth.js          Usuario de Authelia (cabecera Remote-User)
 src/database.js      SQLite y migraciones (PRAGMA user_version)
+src/fx.js            Tipos de cambio del BCE con caché en SQLite
 src/repository.js    Consultas, validación y transacciones
 shared/              Dominio común servidor/navegador: dinero, repartos, saldos, minimizar pagos
 public/              Frontend vanilla, diseñado para móvil primero

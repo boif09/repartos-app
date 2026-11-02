@@ -1,5 +1,6 @@
 import { badRequest, conflict, notFound } from './errors.js';
-import { MAX_CENTS } from '../shared/money.js';
+import { MAX_CENTS, currencyExponent, isCurrencyCode } from '../shared/money.js';
+import { convertMinor, parseRate } from '../shared/fx.js';
 import { computeShares, SplitError, SPLIT_MODES } from '../shared/splits.js';
 import { computeBalances, pairwiseDebts } from '../shared/balances.js';
 import { settle } from '../shared/settle.js';
@@ -30,6 +31,12 @@ function cents(value, field = 'El importe') {
   if (!Number.isSafeInteger(amount) || amount <= 0) throw badRequest(`${field} debe ser mayor que cero.`);
   if (amount > MAX_CENTS) throw badRequest(`${field} es demasiado grande.`);
   return amount;
+}
+
+function currencyCode(value, field = 'Moneda') {
+  const code = String(value ?? '').trim().toUpperCase();
+  if (!isCurrencyCode(code)) throw badRequest(`${field} no válida.`);
+  return code;
 }
 
 function isoDate(value) {
@@ -267,10 +274,11 @@ export function createRepository(db) {
   function createGroup(body, meId) {
     const title = text(body?.title, 'el título', { max: 60 });
     const groupEmoji = emoji(body?.emoji);
+    const baseCurrency = body?.baseCurrency === undefined ? 'EUR' : currencyCode(body.baseCurrency, 'La moneda del grupo');
     const members = Array.isArray(body?.members) ? body.members : [];
     if (members.length > 50) throw badRequest('Demasiadas personas en el grupo.');
     return transaction(() => {
-      const result = db.prepare('INSERT INTO expense_groups (title, emoji) VALUES (?, ?)').run(title, groupEmoji);
+      const result = db.prepare('INSERT INTO expense_groups (title, emoji, base_currency) VALUES (?, ?, ?)').run(title, groupEmoji, baseCurrency);
       const groupId = Number(result.lastInsertRowid);
       addMemberRow(groupId, meId);
       for (const member of members) addMemberRow(groupId, resolveMemberInput(member));
@@ -294,6 +302,17 @@ export function createRepository(db) {
       }
       if (body?.simplifyDebts !== undefined) {
         db.prepare('UPDATE expense_groups SET simplify_debts = ? WHERE id = ?').run(body.simplifyDebts ? 1 : 0, row.id);
+      }
+      if (body?.baseCurrency !== undefined) {
+        const baseCurrency = currencyCode(body.baseCurrency, 'La moneda del grupo');
+        if (baseCurrency !== row.base_currency) {
+          const used = db.prepare(`
+            SELECT 1 FROM expenses WHERE group_id = ? AND deleted_at IS NULL
+            UNION ALL SELECT 1 FROM settlements WHERE group_id = ? AND deleted_at IS NULL LIMIT 1
+          `).get(row.id, row.id);
+          if (used) throw conflict('La moneda del grupo solo se puede cambiar mientras no tenga gastos ni pagos.');
+          db.prepare('UPDATE expense_groups SET base_currency = ? WHERE id = ?').run(baseCurrency, row.id);
+        }
       }
       if (body?.defaultSplit !== undefined) {
         db.prepare('UPDATE expense_groups SET default_split = ? WHERE id = ?').run(validateDefaultSplit(body.defaultSplit, row.id), row.id);
@@ -366,7 +385,10 @@ export function createRepository(db) {
       spentOn: row.spent_on,
       payerId: row.payer_id,
       amountCents: row.base_cents,
+      originalMinor: row.original_minor,
       currency: row.currency,
+      fxRate: row.fx_rate ?? null,
+      fxSource: row.fx_source ?? null,
       splitMode: row.split_mode,
       notes: row.notes ?? null,
       version: row.version,
@@ -385,7 +407,30 @@ export function createRepository(db) {
     return toExpense(row, shares);
   }
 
-  function parseExpenseInput(body, groupId, id) {
+  // Importe del gasto. En la moneda del grupo basta amountCents. En otra moneda llega originalMinor
+  // y el importe base sale del tipo de cambio (ecb/manual) o de lo que cobró la tarjeta (card).
+  function parseMoneyInput(body, baseCurrency) {
+    const currency = body?.currency === undefined ? baseCurrency : currencyCode(body.currency);
+    if (currency === baseCurrency) {
+      const amountCents = cents(body?.amountCents);
+      return { currency, originalMinor: amountCents, amountCents, fxRate: null, fxSource: null };
+    }
+    const originalMinor = cents(body?.originalMinor);
+    const fxSource = String(body?.fxSource || '');
+    if (fxSource === 'card') {
+      return { currency, originalMinor, amountCents: cents(body?.amountCents, 'Lo que cobró la tarjeta'), fxRate: null, fxSource };
+    }
+    if (fxSource !== 'ecb' && fxSource !== 'manual') throw badRequest('Falta el tipo de cambio.');
+    const fxRate = parseRate(body?.fxRate);
+    if (!fxRate) throw badRequest('Tipo de cambio no válido.');
+    const amountCents = convertMinor(originalMinor, fxRate, currencyExponent(currency), currencyExponent(baseCurrency));
+    if (amountCents <= 0) throw badRequest('El importe convertido es demasiado pequeño.');
+    if (amountCents > MAX_CENTS) throw badRequest('El importe convertido es demasiado grande.');
+    return { currency, originalMinor, amountCents, fxRate, fxSource };
+  }
+
+  function parseExpenseInput(body, groupRow, id) {
+    const groupId = groupRow.id;
     const members = new Set(memberIds(groupId));
     const payerId = positiveId(body?.payerId, 'Quién pagó');
     if (!members.has(payerId)) throw badRequest('Quien pagó tiene que ser del grupo.');
@@ -395,10 +440,10 @@ export function createRepository(db) {
     for (const entry of entries) {
       if (!members.has(Number(entry?.personId))) throw badRequest('Todas las personas del reparto tienen que ser del grupo.');
     }
-    const amountCents = cents(body?.amountCents);
+    const money = parseMoneyInput(body, groupRow.base_currency);
     let shares;
     try {
-      shares = computeShares({ totalCents: amountCents, mode: splitMode, entries, seed: id });
+      shares = computeShares({ totalCents: money.amountCents, mode: splitMode, entries, seed: id, originalTotal: money.originalMinor });
     } catch (error) {
       if (error instanceof SplitError) throw badRequest(error.message);
       throw error;
@@ -407,7 +452,7 @@ export function createRepository(db) {
       description: text(body?.description, 'la descripción', { max: 120 }),
       spentOn: isoDate(body?.spentOn),
       payerId,
-      amountCents,
+      ...money,
       splitMode,
       notes: text(body?.notes, 'la nota', { max: 500, required: false }),
       shares,
@@ -428,13 +473,14 @@ export function createRepository(db) {
       if (existing.group_id !== row.id) throw conflict('Ese identificador ya está en uso.');
       return { created: false, expense: getExpense(id) };
     }
-    const input = parseExpenseInput(body, row.id, id);
+    const input = parseExpenseInput(body, row, id);
     transaction(() => {
       db.prepare(`
-        INSERT INTO expenses (id, group_id, description, spent_on, payer_id, original_minor, currency, base_cents, split_mode, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, row.id, input.description, input.spentOn, input.payerId, input.amountCents, row.base_currency,
-        input.amountCents, input.splitMode, input.notes);
+        INSERT INTO expenses (id, group_id, description, spent_on, payer_id, original_minor, currency, fx_rate, fx_source,
+          base_cents, split_mode, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, row.id, input.description, input.spentOn, input.payerId, input.originalMinor, input.currency, input.fxRate,
+        input.fxSource, input.amountCents, input.splitMode, input.notes);
       insertShares(id, input.shares);
     });
     return { created: true, expense: getExpense(id) };
@@ -455,14 +501,14 @@ export function createRepository(db) {
     if (Number(body?.version) !== row.version) {
       throw conflict('Este gasto ha cambiado en otro dispositivo.', { expense: getExpense(row.id) });
     }
-    const input = parseExpenseInput(body, row.group_id, row.id);
+    const input = parseExpenseInput(body, getGroupRow(row.group_id), row.id);
     transaction(() => {
       const result = db.prepare(`
-        UPDATE expenses SET description = ?, spent_on = ?, payer_id = ?, original_minor = ?, base_cents = ?,
-          split_mode = ?, notes = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+        UPDATE expenses SET description = ?, spent_on = ?, payer_id = ?, original_minor = ?, currency = ?, fx_rate = ?,
+          fx_source = ?, base_cents = ?, split_mode = ?, notes = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND version = ?
-      `).run(input.description, input.spentOn, input.payerId, input.amountCents, input.amountCents,
-        input.splitMode, input.notes, row.id, row.version);
+      `).run(input.description, input.spentOn, input.payerId, input.originalMinor, input.currency, input.fxRate,
+        input.fxSource, input.amountCents, input.splitMode, input.notes, row.id, row.version);
       if (Number(result.changes) !== 1) throw conflict('Este gasto ha cambiado en otro dispositivo.');
       db.prepare('DELETE FROM expense_shares WHERE expense_id = ?').run(row.id);
       insertShares(row.id, input.shares);

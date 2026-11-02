@@ -7,10 +7,11 @@ export class SplitError extends Error {}
 // Calcula cuánto debe cada participante de un gasto.
 //   equal:  entries = [{ personId }]                 -> a partes iguales
 //   shares: entries = [{ personId, value: peso }]    -> proporcional (60/40, 2/1/1…)
-//   exact:  entries = [{ personId, value: céntimos }] -> importes exactos; deben sumar totalCents
+//   exact:  entries = [{ personId, value: importe }]  -> importes exactos en la moneda ORIGINAL;
+//           deben sumar originalTotal (por defecto totalCents, si el gasto es en la moneda base)
 // Las personas con peso o importe 0 no participan.
-// Devuelve [{ personId, inputValue, owedCents }] con Σ owedCents === totalCents.
-export function computeShares({ totalCents, mode, entries, seed = '' }) {
+// Devuelve [{ personId, inputValue, owedCents }] con Σ owedCents === totalCents (moneda base).
+export function computeShares({ totalCents, mode, entries, seed = '', originalTotal = totalCents }) {
   if (!SPLIT_MODES.includes(mode)) throw new SplitError('Modo de reparto no válido.');
   if (!Number.isSafeInteger(totalCents) || totalCents <= 0) throw new SplitError('El importe debe ser mayor que cero.');
   if (!Array.isArray(entries)) throw new SplitError('Faltan los participantes.');
@@ -32,7 +33,7 @@ export function computeShares({ totalCents, mode, entries, seed = '' }) {
 
   if (mode === 'exact') {
     const assigned = participants.reduce((sum, item) => sum + item.value, 0);
-    if (assigned !== totalCents) {
+    if (assigned !== originalTotal) {
       throw new SplitError('Los importes de cada persona no suman el total del gasto.');
     }
   }
@@ -41,8 +42,9 @@ export function computeShares({ totalCents, mode, entries, seed = '' }) {
     throw new SplitError('Las partes son demasiado grandes.');
   }
 
-  // En modo exact los importes ya cuadran: se usan tal cual.
-  const owed = mode === 'exact'
+  // En modo exact y la misma moneda los importes ya cuadran: se usan tal cual.
+  // En otra moneda se convierten proporcionalmente para que sumen exactamente el total base.
+  const owed = mode === 'exact' && originalTotal === totalCents
     ? participants.map((item) => item.value)
     : allocate(totalCents, participants.map((item) => item.value), seed);
   return participants.map((item, index) => ({

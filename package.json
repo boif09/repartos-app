@@ -11,6 +11,6 @@
     "start": "node --no-warnings --env-file-if-exists=.env server.js",
     "dev": "node --no-warnings --env-file-if-exists=.env --watch server.js",
     "test": "node --no-warnings --test",
-    "check": "node --check server.js && node --check src/app.js && node --check src/auth.js && node --check src/database.js && node --check public/app.js && node --check src/repository.js && node --check src/errors.js && node --check shared/money.js && node --check shared/splits.js && node --check shared/balances.js && node --check shared/settle.js"
+    "check": "node --check server.js && node --check src/app.js && node --check src/auth.js && node --check src/database.js && node --check public/app.js && node --check src/repository.js && node --check src/errors.js && node --check shared/money.js && node --check shared/splits.js && node --check shared/balances.js && node --check shared/settle.js && node --check shared/fx.js && node --check src/fx.js"
   }
 }
