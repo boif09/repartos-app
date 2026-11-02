@@ -25,6 +25,7 @@
   --positive: #0b7a4b;
   --negative: #c03a1f;
   --danger: #c03a1f;
+  --danger-text: #ffffff;
   --warning: #9a5b00;
   --shadow: 0 1px 2px rgb(20 22 26 / 5%);
   --shadow-raised: 0 8px 24px rgb(43 63 214 / 28%);
@@ -61,6 +62,7 @@
     --positive: #4fc48c;
     --negative: #ff7f61;
     --danger: #ff7f61;
+    --danger-text: #0d0f12;
     --warning: #f0b35a;
     --shadow: none;
     --shadow-raised: 0 8px 24px rgb(0 0 0 / 45%);
@@ -248,7 +250,8 @@ button.row:disabled { cursor: default; }
 .row-side strong { font-weight: 500; }
 .row-side .small { font-size: var(--fs-xs); font-family: var(--font); letter-spacing: 0; }
 .row-side .small.num { font-family: var(--mono); }
-.hero-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.hero-line { display: grid; gap: 2px; }
+.hero-line + .hero-line { margin-top: 8px; }
 .chevron-end { color: var(--muted); }
 
 .day {
@@ -326,6 +329,7 @@ button.row:disabled { cursor: default; }
 .btn.secondary { background: var(--surface); color: var(--text); border-color: var(--control); }
 .btn.ghost { background: transparent; color: var(--accent); }
 .btn.danger-ghost { background: transparent; color: var(--danger); }
+.btn.danger { background: var(--danger); color: var(--danger-text); }
 .btn.small { min-height: 36px; padding: 0 12px; font-size: var(--fs-sm); }
 
 .link-btn {
@@ -630,6 +634,28 @@ body.is-offline .topbar { top: 26px; }
 body.is-offline .fab, body.is-offline button[type="submit"] { opacity: .6; }
 
 .share-url { font-size: var(--fs-sm) !important; color: var(--muted) !important; font-family: var(--mono) !important; }
+
+/* ---------- Hoja de confirmación ---------- */
+
+dialog.sheet {
+  width: 100%;
+  max-width: 600px;
+  margin: auto auto 0;
+  padding: 0;
+  border: 0;
+  border-radius: 16px 16px 0 0;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 -8px 32px rgb(0 0 0 / 25%);
+}
+dialog.sheet::backdrop { background: rgb(8 10 14 / 45%); }
+dialog.sheet[open] { animation: sheet-in .18s ease-out; }
+@keyframes sheet-in { from { transform: translateY(24px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { dialog.sheet[open] { animation: none; } }
+.sheet-body { display: grid; gap: 8px; padding: 20px 16px calc(16px + env(safe-area-inset-bottom)); }
+.sheet-body h2 { font-size: var(--fs-lg); }
+.sheet-body p { margin: 0 0 8px; }
+.sheet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
 /* ---------- Aviso flotante ---------- */
 

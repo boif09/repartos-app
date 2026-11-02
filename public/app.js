@@ -314,6 +314,35 @@ function emojiPicker(current, onPick) {
     })));
 }
 
+// Confirmación propia (hoja inferior) en lugar del diálogo gris del navegador.
+// <dialog> nativo: atrapa el foco, se cierra con Escape y empieza enfocado en "Cancelar".
+function confirmSheet({ title, message, confirmLabel, danger = false }) {
+  return new Promise((resolve) => {
+    const dialog = el('dialog', { class: 'sheet', 'aria-labelledby': 'sheet-title' });
+    const close = (value) => {
+      dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    dialog.append(el('div', { class: 'sheet-body' },
+      el('h2', { id: 'sheet-title', text: title }),
+      message && el('p', { class: 'muted', text: message }),
+      el('div', { class: 'sheet-actions' },
+        el('button', { type: 'button', class: 'btn secondary', text: 'Cancelar', onClick: () => close(false) }),
+        el('button', { type: 'button', class: danger ? 'btn danger' : 'btn primary', text: confirmLabel, onClick: () => close(true) }))));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      close(false);
+    });
+    // Tocar fuera de la hoja (el fondo) también cancela.
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) close(false);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+}
+
 function field(label, input, hint) {
   return el('label', { class: 'field' }, el('span', { class: 'field-label', text: label }), input, hint && el('span', { class: 'field-hint', text: hint }));
 }
@@ -334,6 +363,22 @@ async function groupsView() {
   const active = groups.filter((group) => !group.archived);
   const archived = groups.filter((group) => group.archived);
 
+  // Total de lo que te deben o debes en los grupos activos, por moneda.
+  const totals = new Map();
+  for (const group of active) {
+    if (group.myBalanceCents) totals.set(group.baseCurrency, (totals.get(group.baseCurrency) || 0) + group.myBalanceCents);
+  }
+  const nonZero = [...totals].filter(([, cents]) => cents !== 0);
+  const summary = active.length > 0 && el('div', { class: 'card hero' },
+    el('div', { class: 'hero-top' },
+      avatar(session.person.id, session.person.name, { large: true }),
+      el('div', { class: 'hero-text' },
+        nonZero.length
+          ? nonZero.map(([currency, cents]) => el('span', { class: 'hero-line' },
+            el('span', { class: 'label', text: cents > 0 ? 'En total te deben' : 'En total debes' }),
+            el('strong', { class: `big ${cents > 0 ? 'positive' : 'negative'}`, text: formatMoney(Math.abs(cents), currency) })))
+          : [el('span', { class: 'label', text: 'En todos tus grupos' }), el('strong', { class: 'big muted', text: 'Estás en paz' })])));
+
   const row = (group) => {
     const balance = balanceText(group.myBalanceCents, group.baseCurrency);
     return el('a', { class: 'row group-row', href: `#/g/${group.id}` },
@@ -347,6 +392,7 @@ async function groupsView() {
   mount(
     topbar({ title: 'Repartos' }),
     el('section', { class: 'content' },
+      summary,
       active.length
         ? el('div', { class: 'card list' }, active.map(row))
         : el('div', { class: 'card empty' },
@@ -504,7 +550,7 @@ function timeline(bundle, people) {
 
 async function deleteSettlement(bundle, settlement, people) {
   const label = `${paymentText(people, settlement.fromId, settlement.toId, 'past')} ${formatMoney(settlement.amountCents, bundle.group.baseCurrency)}`;
-  if (!window.confirm(`¿Borrar este pago? ${label}`)) return;
+  if (!(await confirmSheet({ title: '¿Borrar este pago?', message: label, confirmLabel: 'Borrar pago', danger: true }))) return;
   try {
     await api(`settlements/${settlement.id}`, { method: 'DELETE' });
     render();
@@ -1164,7 +1210,7 @@ async function expenseFormView(groupId, expenseId, query) {
     class: 'btn danger-ghost block',
     text: 'Borrar gasto',
     onClick: async () => {
-      if (!window.confirm(`¿Borrar "${editing.description}"?`)) return;
+      if (!(await confirmSheet({ title: `¿Borrar «${editing.description}»?`, message: 'Podrás deshacerlo justo después.', confirmLabel: 'Borrar gasto', danger: true }))) return;
       try {
         await api(`expenses/${id}`, { method: 'DELETE', body: { version: editing.version } });
         navigate(`#/g/${groupId}`, { replace: true });
@@ -1276,15 +1322,24 @@ function defaultSplitCard(bundle, patch) {
       el('div', { class: 'list' },
         bundle.members.map((member) => el('div', { class: 'row static' },
           el('span', { class: 'row-main', text: member.id === session.person.id ? `${member.name} (tú)` : member.name }),
-          stepper(weights.get(member.id), (value) => weights.set(member.id, value), member.name)))));
+          stepper(weights.get(member.id), (value) => {
+            weights.set(member.id, value);
+            saveSoon();
+          }, member.name)))));
   };
 
+  // Se guarda solo: al cambiar de modo al momento y al ajustar las partes, al dejar de tocar.
+  let timer = null;
   const save = () => {
-    if (!custom) return patch({ defaultSplit: null }, 'Reparto por defecto: a partes iguales');
+    window.clearTimeout(timer);
+    if (!custom) return patch({ defaultSplit: null }, 'Reparto: a partes iguales', { rerender: false });
     const entries = [...weights].map(([personId, weight]) => ({ personId, weight }));
     if (!entries.some((entry) => entry.weight > 0)) return toast('Al menos una persona tiene que tener partes.');
-    const summary = entries.map((entry) => entry.weight).join('/');
-    return patch({ defaultSplit: entries }, `Reparto por defecto: ${summary}`);
+    return patch({ defaultSplit: entries }, `Reparto: ${entries.map((entry) => entry.weight).join('/')}`, { rerender: false });
+  };
+  const saveSoon = () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(save, 800);
   };
 
   renderBody();
@@ -1295,9 +1350,9 @@ function defaultSplitCard(bundle, patch) {
     segmented([['equal', 'Iguales'], ['shares', 'Por partes']], custom ? 'shares' : 'equal', (value) => {
       custom = value === 'shares';
       renderBody();
+      save();
     }, 'Reparto por defecto'),
-    body,
-    el('button', { type: 'button', class: 'btn secondary block', text: 'Guardar reparto', onClick: save }));
+    body);
 }
 
 async function settingsView(groupId) {
@@ -1306,23 +1361,45 @@ async function settingsView(groupId) {
   const writable = !group.archived;
   let emoji = group.emoji || GROUP_EMOJIS[0];
 
-  const patch = async (body, message) => {
+  // Todo se guarda al momento. Sin volver a pintar la pantalla cuando no hace falta (no se pierde el foco).
+  const patch = async (body, message, { rerender = true } = {}) => {
     try {
       await api(`groups/${groupId}`, { method: 'PATCH', body });
-      if (message) toast(message);
-      render();
+      toast(message ? `${message} · guardado` : 'Guardado');
+      if (rerender) render();
     } catch (error) {
       handleError(error);
+      render();
     }
   };
 
-  const title = el('input', { type: 'text', maxLength: 60, value: group.title, disabled: !writable });
+  let savedTitle = group.title;
+  const title = el('input', {
+    type: 'text',
+    maxLength: 60,
+    value: group.title,
+    disabled: !writable,
+    onChange: () => {
+      const next = title.value.trim().replace(/\s+/g, ' ');
+      if (!next) {
+        title.value = savedTitle;
+        toast('El grupo necesita un nombre.');
+        return;
+      }
+      if (next === savedTitle) return;
+      savedTitle = next;
+      patch({ title: next }, 'Nombre', { rerender: false });
+    },
+  });
+  title.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') title.blur();
+  });
   const simplify = el('input', {
     type: 'checkbox',
     class: 'switch',
     checked: group.simplifyDebts,
     disabled: !writable,
-    onChange: () => patch({ simplifyDebts: simplify.checked }, simplify.checked ? 'Deudas simplificadas' : 'Deudas sin simplificar'),
+    onChange: () => patch({ simplifyDebts: simplify.checked }, simplify.checked ? 'Deudas simplificadas' : 'Deudas sin simplificar', { rerender: false }),
   });
 
   const memberIds = new Set(bundle.members.map((m) => m.id));
@@ -1345,11 +1422,14 @@ async function settingsView(groupId) {
     topbar({ title: 'Ajustes del grupo', back: `#/g/${groupId}` }),
     el('section', { class: 'content form' },
       field('Nombre', title),
-      writable && field('Icono', emojiPicker(emoji, (value) => { emoji = value; })),
+      el('p', { class: 'muted small', text: writable ? 'Los cambios se guardan solos.' : 'Grupo archivado: solo lectura.' }),
+      writable && field('Icono', emojiPicker(emoji, (value) => {
+        emoji = value;
+        patch({ emoji: value }, 'Icono', { rerender: false });
+      })),
       field('Moneda de las cuentas', currencySelect(group.baseCurrency, (value) => patch({ baseCurrency: value }, `Moneda del grupo: ${value}`),
         { disabled: !writable || bundle.expenses.length > 0 || bundle.settlements.length > 0 }),
       bundle.expenses.length || bundle.settlements.length ? 'No se puede cambiar cuando ya hay gastos o pagos.' : undefined),
-      writable && el('button', { type: 'button', class: 'btn secondary block', text: 'Guardar nombre e icono', onClick: () => patch({ title: title.value, emoji }, 'Grupo actualizado') }),
 
       el('label', { class: 'card switch-row' },
         el('span', {},
@@ -1369,7 +1449,7 @@ async function settingsView(groupId) {
             class: 'link-btn danger',
             text: 'Quitar',
             onClick: async () => {
-              if (!window.confirm(`¿Quitar a ${member.name} del grupo?`)) return;
+              if (!(await confirmSheet({ title: `¿Quitar a ${member.name} del grupo?`, message: 'Solo se puede si no aparece en ningún gasto ni pago.', confirmLabel: 'Quitar', danger: true }))) return;
               try {
                 await api(`groups/${groupId}/members/${member.id}`, { method: 'DELETE' });
                 render();
@@ -1384,8 +1464,12 @@ async function settingsView(groupId) {
         type: 'button',
         class: group.archived ? 'btn secondary block' : 'btn danger-ghost block',
         text: group.archived ? 'Desarchivar grupo' : 'Archivar grupo',
-        onClick: () => {
-          if (!group.archived && !window.confirm('El grupo pasará a solo lectura. ¿Archivar?')) return;
+        onClick: async () => {
+          if (!group.archived && !(await confirmSheet({
+            title: '¿Archivar el grupo?',
+            message: 'Pasará a solo lectura. Podrás desarchivarlo cuando quieras.',
+            confirmLabel: 'Archivar',
+          }))) return;
           patch({ archived: !group.archived }, group.archived ? 'Grupo desarchivado' : 'Grupo archivado');
         },
       })));
@@ -1405,8 +1489,8 @@ function shareUrl(token) {
 function shareCard(bundle) {
   const groupId = bundle.group.id;
   const token = bundle.group.shareToken;
-  const change = async (method, message, question) => {
-    if (question && !window.confirm(question)) return;
+  const change = async (method, message, confirmation) => {
+    if (confirmation && !(await confirmSheet(confirmation))) return;
     try {
       await api(`groups/${groupId}/share`, { method, body: {} });
       toast(message);
@@ -1444,8 +1528,8 @@ function shareCard(bundle) {
       }),
       el('button', { type: 'button', class: 'btn secondary', text: 'Copiar', onClick: copy })),
     el('div', { class: 'field-row' },
-      el('button', { type: 'button', class: 'link-btn', text: 'Cambiar enlace', onClick: () => change('POST', 'Enlace cambiado', 'El enlace actual dejará de funcionar. ¿Crear uno nuevo?') }),
-      el('button', { type: 'button', class: 'link-btn danger', text: 'Dejar de compartir', onClick: () => change('DELETE', 'Ya no se comparte', '¿Dejar de compartir? El enlace dejará de funcionar.') })));
+      el('button', { type: 'button', class: 'link-btn', text: 'Cambiar enlace', onClick: () => change('POST', 'Enlace cambiado', { title: '¿Cambiar el enlace?', message: 'El enlace actual dejará de funcionar.', confirmLabel: 'Cambiar enlace' }) }),
+      el('button', { type: 'button', class: 'link-btn danger', text: 'Dejar de compartir', onClick: () => change('DELETE', 'Ya no se comparte', { title: '¿Dejar de compartir?', message: 'El enlace dejará de funcionar.', confirmLabel: 'Dejar de compartir', danger: true }) })));
 }
 
 // Vista de amigos (/s/#token): sin sesión, solo lectura.
