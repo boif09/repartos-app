@@ -658,7 +658,11 @@ select {
 }
 body.is-offline .app { padding-top: 26px; }
 body.is-offline .topbar { top: 26px; }
-body.is-offline .fab, body.is-offline button[type="submit"] { opacity: .6; }
+/* Gastos y pagos guardados en el móvil, pendientes de enviar. */
+.row.pending { background: repeating-linear-gradient(-45deg, transparent 0 10px, color-mix(in srgb, var(--surface-2) 70%, transparent) 10px 20px); }
+.row.pending .row-main strong { color: var(--muted); }
+.pending-meta { display: inline-flex; align-items: center; gap: 4px; }
+.row.pending.failed .pending-meta { color: var(--danger); white-space: normal; }
 
 .share-url { font-size: var(--fs-sm) !important; color: var(--muted) !important; font-family: var(--mono) !important; }
 

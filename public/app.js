@@ -3,6 +3,8 @@
 // nginx responde con una redirección y la app recarga la página para que el navegador la siga.
 import { allocate, centsToInput, currencyExponent, formatMoney, parseAmount } from './shared/money.js';
 import { convertMinor, parseRate } from './shared/fx.js';
+import { mergePending, pendingDelta } from './shared/pending.js';
+import { listItems, outboxAvailable, putItem, removeItem } from './outbox.js';
 import { computeShares, SplitError } from './shared/splits.js';
 
 const appEl = document.getElementById('app');
@@ -21,6 +23,8 @@ let renderToken = 0;
 // ---------- Utilidades ----------
 
 class SessionExpiredError extends Error {}
+// La petición no llegó (sin red, o tan lenta que se cortó). Crear gastos y pagos se puede reintentar sin duplicar.
+class OfflineError extends Error {}
 
 // La vista de amigos vive en /s/#token: la API está un nivel por encima.
 const SHARED_MODE = /\/s\/$/.test(location.pathname);
@@ -28,7 +32,7 @@ const API_ROOT = SHARED_MODE ? '../api/' : 'api/';
 const OFFLINE_WRITE = 'Sin conexión: no se puede guardar ahora. Inténtalo cuando vuelva la cobertura.';
 
 async function api(pathName, { method = 'GET', body, headers = {} } = {}) {
-  if (method !== 'GET' && !navigator.onLine) throw new Error(OFFLINE_WRITE);
+  if (method !== 'GET' && !navigator.onLine) throw new OfflineError(OFFLINE_WRITE);
   let response;
   try {
     response = await fetch(`${API_ROOT}${pathName}`, {
@@ -37,9 +41,12 @@ async function api(pathName, { method = 'GET', body, headers = {} } = {}) {
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: 'same-origin',
       redirect: 'manual',
+      // Con cobertura mala una escritura puede quedarse colgada: a los 15 s se trata como sin conexión.
+      signal: method === 'GET' ? undefined : AbortSignal.timeout(15000),
     });
   } catch {
-    throw new Error(method === 'GET' ? 'Sin conexión y sin datos guardados para esta pantalla.' : OFFLINE_WRITE);
+    if (method === 'GET') throw new Error('Sin conexión y sin datos guardados para esta pantalla.');
+    throw new OfflineError(OFFLINE_WRITE);
   }
   // El service worker marca las respuestas que salen de la caché por falta de red.
   if (method === 'GET') setOfflineData(response.headers.get('X-Repartos-Offline') === '1');
@@ -68,8 +75,138 @@ function setOfflineData(value) {
 
 function updateOfflineBanner() {
   const offline = !navigator.onLine || offlineData;
-  offlineBanner.textContent = offline ? 'Sin conexión · viendo los últimos datos guardados' : '';
+  const waiting = pendingItems.filter((item) => !item.error).length;
+  offlineBanner.textContent = !offline ? ''
+    : waiting ? `Sin conexión · ${waiting === 1 ? '1 pendiente' : `${waiting} pendientes`} de enviar`
+      : 'Sin conexión · viendo los últimos datos guardados';
   document.body.classList.toggle('is-offline', offline);
+}
+
+// ---------- Cola sin conexión ----------
+
+let pendingItems = []; // gastos y pagos de este usuario guardados en el móvil
+let syncing = false;
+let retryTimer = null;
+const inFlight = new Set(); // ids que un formulario está enviando ahora mismo
+
+// Con red "lenta pero conectada" no llega ningún evento online: se reintenta cada 30 s.
+function scheduleRetry() {
+  window.clearTimeout(retryTimer);
+  retryTimer = window.setTimeout(syncOutbox, 30000);
+}
+
+async function refreshPending() {
+  if (!session || !outboxAvailable()) return pendingItems;
+  try {
+    pendingItems = await listItems(session.user);
+  } catch {
+    pendingItems = [];
+  }
+  updateOfflineBanner();
+  return pendingItems;
+}
+
+async function queueForLater(item) {
+  await putItem({ ...item, user: session.user, createdAt: new Date().toISOString() });
+  await refreshPending();
+}
+
+// Crear un gasto o pago: PRIMERO se guarda en el móvil y luego se envía. Si la app se cierra a mitad,
+// no hay red o la sesión caduca, queda en la cola y se enviará solo (reenviar no duplica: mismo id).
+// Devuelve 'sent' o 'queued'; los rechazos del servidor se lanzan y no quedan en la cola.
+async function createWithOutbox(item) {
+  let queued = false;
+  if (outboxAvailable()) {
+    try {
+      await queueForLater(item);
+      queued = true;
+    } catch {
+      queued = false; // sin IndexedDB (p. ej. navegación privada): se intenta enviar directamente
+    }
+  }
+  inFlight.add(item.id);
+  try {
+    await api(item.path, { method: 'POST', body: item.body });
+    if (queued) await removeItem(item.id).catch(() => {});
+    return 'sent';
+  } catch (error) {
+    if (queued && error instanceof OfflineError) {
+      scheduleRetry();
+      return 'queued';
+    }
+    if (queued && !(error instanceof SessionExpiredError)) await removeItem(item.id).catch(() => {});
+    throw error;
+  } finally {
+    inFlight.delete(item.id);
+    await refreshPending();
+  }
+}
+
+// Envía la cola en el orden en que se creó. Se para ante un fallo de red, de sesión o del servidor
+// (se reintentará); si el servidor rechaza un elemento (4xx), queda marcado para que la persona decida.
+async function syncOutbox() {
+  if (syncing || !session || !outboxAvailable() || !navigator.onLine) return;
+  syncing = true;
+  let sent = 0;
+  let stopped = false;
+  try {
+    // La sesión pudo venir de la caché (arranque sin red): se confirma con el servidor que sigue
+    // siendo la misma persona antes de enviar nada a su nombre.
+    const fresh = await api('session').catch(() => null);
+    if (!fresh || offlineData) return;
+    if (fresh.user !== session.user) {
+      window.location.reload();
+      return;
+    }
+    for (const item of await refreshPending()) {
+      if (item.error || inFlight.has(item.id)) continue;
+      try {
+        await api(item.path, { method: 'POST', body: item.body });
+        await removeItem(item.id);
+        sent += 1;
+      } catch (error) {
+        if (error instanceof OfflineError || error instanceof SessionExpiredError || !error.status || error.status >= 500) {
+          stopped = true;
+          break;
+        }
+        await putItem({ ...item, error: error.message });
+      }
+    }
+  } finally {
+    syncing = false;
+    await refreshPending();
+    if (stopped && navigator.onLine) scheduleRetry();
+  }
+  if (sent) {
+    toast(sent === 1 ? '1 pendiente enviado' : `${sent} pendientes enviados`);
+    if (!document.querySelector('form')) render();
+  }
+}
+
+// Fila de un gasto o pago que aún no está en el servidor.
+function pendingRow({ id, title, amountText, payerId, people, error }) {
+  return el('button', { type: 'button', class: `row pending${error ? ' failed' : ''}`, onClick: () => pendingSheet(id, title, error) },
+    payerId ? avatar(payerId, people.get(payerId)?.name) : el('span', { class: 'pay-icon' }, icon('swap', { small: true })),
+    el('span', { class: 'row-main' },
+      el('strong', { text: title }),
+      el('span', { class: 'meta pending-meta' }, icon('cloudOff', { small: true }), error ? `No se pudo enviar: ${error}` : 'Pendiente de enviar')),
+    el('span', { class: 'row-side' }, el('strong', { text: amountText })));
+}
+
+async function pendingSheet(id, title, error) {
+  const discard = await confirmSheet({
+    title: error ? 'No se pudo enviar' : 'Pendiente de enviar',
+    message: error
+      ? `«${title}»: ${error} Puedes descartarlo y volver a apuntarlo.`
+      : `«${title}» está guardado en este móvil y se enviará solo cuando haya conexión.`,
+    confirmLabel: 'Descartar',
+    danger: true,
+  });
+  if (!discard) return;
+  await removeItem(id);
+  await refreshPending();
+  toast('Descartado');
+  render();
 }
 
 // Crea elementos sin innerHTML: los datos nunca se interpretan como HTML.
@@ -156,6 +293,7 @@ const ICONS = {
   plus: ['M12 5v14', 'M5 12h14'],
   swap: ['M7 7h11l-3-3', 'M17 17H6l3 3'],
   check: ['M20 6L9 17l-5-5'],
+  cloudOff: ['M2 2l20 20', 'M5.8 5.8A7 7 0 0 0 9 19h8.5', 'M20.5 16.5A4.5 4.5 0 0 0 17.5 9h-1.3A7 7 0 0 0 9.5 5.1'],
   moon: ['M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'],
   contrast: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 3v18', 'M12 7h4.5', 'M12 11h6.5', 'M12 15h6', 'M12 19h3'],
   down: ['M6 9l6 6 6-6'],
@@ -400,7 +538,10 @@ function loading() {
 // ---------- Vistas ----------
 
 async function groupsView() {
-  const { groups } = await api('groups');
+  const [{ groups: serverGroups }, items] = await Promise.all([api('groups'), refreshPending()]);
+  // Los pendientes de cada grupo ya cuentan en "te deben / debes".
+  const groups = serverGroups.map((group) => (group.myBalanceCents === null ? group
+    : { ...group, myBalanceCents: group.myBalanceCents + pendingDelta(items, group.id, session.person.id, group.baseCurrency) }));
   const active = groups.filter((group) => !group.archived);
   const archived = groups.filter((group) => group.archived);
 
@@ -556,6 +697,13 @@ function timeline(bundle, people) {
       dayCard = el('div', { class: 'card list' });
       list.append(el('h3', { class: 'day', text: formatDay(item.date) }), dayCard);
     }
+    if (item.data.pending) {
+      const pending = item.data;
+      dayCard.append(item.type === 'expense'
+        ? pendingRow({ id: pending.id, title: pending.description, amountText: formatMoney(pending.originalMinor, pending.currency), payerId: pending.payerId, people, error: pending.error })
+        : pendingRow({ id: pending.id, title: paymentText(people, pending.fromId, pending.toId, 'past'), amountText: formatMoney(pending.amountCents, cur), people, error: pending.error }));
+      continue;
+    }
     if (item.type === 'expense') {
       const expense = item.data;
       const myShare = expense.shares.find((share) => share.personId === meId)?.owedCents ?? 0;
@@ -676,7 +824,8 @@ function balanceHero(bundle, tab) {
 }
 
 async function groupView(groupId, tab) {
-  const bundle = await api(`groups/${groupId}`);
+  const [serverBundle, items] = await Promise.all([api(`groups/${groupId}`), refreshPending()]);
+  const bundle = mergePending(serverBundle, items, session.person.id);
   rememberGroup(bundle.group.id);
   const people = new Map(bundle.members.map((person) => [person.id, person]));
   const base = `#/g/${groupId}`;
@@ -1224,10 +1373,37 @@ async function expenseFormView(groupId, expenseId, query) {
       }
       submit.disabled = true;
       try {
-        if (editing) await api(`expenses/${id}`, { method: 'PUT', body: { ...body, version: editing.version } });
-        else await api(`groups/${groupId}/expenses`, { method: 'POST', body });
+        if (editing) {
+          await api(`expenses/${id}`, { method: 'PUT', body: { ...body, version: editing.version } });
+          navigate(`#/g/${groupId}`, { replace: true });
+          toast('Gasto actualizado');
+          return;
+        }
+        // Un gasto nuevo se guarda primero en el móvil: sin red se enviará solo más tarde.
+        const total = baseTotal();
+        const result = await createWithOutbox({
+          id,
+          kind: 'expense',
+          groupId: bundle.group.id,
+          baseCurrency: base,
+          path: `groups/${groupId}/expenses`,
+          body,
+          expense: {
+            id,
+            groupId: bundle.group.id,
+            description: body.description.trim(),
+            spentOn: body.spentOn,
+            payerId,
+            amountCents: total,
+            originalMinor: original,
+            currency,
+            splitMode: mode,
+            shares: computeShares({ totalCents: total, mode, entries, seed: id, originalTotal: original }),
+            createdAt: new Date().toISOString(),
+          },
+        });
         navigate(`#/g/${groupId}`, { replace: true });
-        toast(editing ? 'Gasto actualizado' : 'Gasto añadido');
+        toast(result === 'queued' ? 'Sin conexión: guardado en el móvil. Se enviará solo.' : 'Gasto añadido');
       } catch (requestError) {
         submit.disabled = false;
         if (requestError.status === 409 && requestError.data?.expense) {
@@ -1326,9 +1502,22 @@ async function settlementFormView(groupId, query) {
       if (fromId === toId) return toast('Quien paga y quien recibe no pueden ser la misma persona.');
       if (!cents) return (amount.focus(), toast('Importe no válido.'));
       submit.disabled = true;
+      const body = { id, fromId, toId, amountCents: cents, paidOn: date.value };
       try {
-        await api(`groups/${groupId}/settlements`, { method: 'POST', body: { id, fromId, toId, amountCents: cents, paidOn: date.value } });
+        const result = await createWithOutbox({
+          id,
+          kind: 'settlement',
+          groupId: bundle.group.id,
+          baseCurrency: cur,
+          path: `groups/${groupId}/settlements`,
+          body,
+          settlement: { ...body, groupId: bundle.group.id, createdAt: new Date().toISOString() },
+        });
         navigate(`#/g/${groupId}/saldos`, { replace: true });
+        if (result === 'queued') {
+          toast('Sin conexión: pago guardado en el móvil. Se enviará solo.');
+          return;
+        }
         toast('Pago registrado', {
           label: 'Deshacer',
           onClick: async () => {
@@ -1734,7 +1923,12 @@ async function init() {
   document.body.prepend(offlineBanner);
   window.addEventListener('online', () => {
     updateOfflineBanner();
-    if (!SHARED_MODE) render();
+    if (SHARED_MODE) return;
+    render();
+    syncOutbox();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !SHARED_MODE) syncOutbox();
   });
   window.addEventListener('offline', updateOfflineBanner);
   updateOfflineBanner();
@@ -1750,6 +1944,7 @@ async function init() {
     session = await api('session');
     sessionStorage.removeItem('repartos-reloaded');
     forgetOtherUsersData(session.user);
+    refreshPending().then(syncOutbox);
   } catch (error) {
     if (error instanceof SessionExpiredError && !sessionStorage.getItem('repartos-reloaded')) {
       // Evita un bucle de recargas si el servidor responde 401 sin pasar por Authelia (p. ej. en local).

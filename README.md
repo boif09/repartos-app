@@ -70,7 +70,8 @@ Además:
 - CSP estricta, sin JS ni CSS inline.
 - Si la sesión de Authelia caduca, la app recarga la página para volver a pasar por el login.
 - **Enlace para amigos** (`/s/#token`): token aleatorio de 128 bits por grupo. Va en el `#` de la URL y la app lo manda a la API en la cabecera `X-Share-Token`, así nunca aparece en los logs de acceso. Solo lectura: gastos, saldos y pagos sugeridos, sin notas ni usuarios de Authelia. Se puede cambiar o revocar desde los ajustes del grupo. En nginx esas rutas van sin Authelia, solo con GET y con `Remote-User` vaciado.
-- **Sin conexión**: el service worker guarda la app y las últimas lecturas de la API para consultarlas sin red (a propósito, aunque la API responda `no-store`). Las escrituras necesitan conexión y nunca se guardan redirecciones al login. Si en el mismo navegador entra otro usuario, se borran los datos guardados del anterior.
+- **Sin conexión**: el service worker guarda la app y las últimas lecturas de la API para consultarlas sin red (a propósito, aunque la API responda `no-store`). Nunca se guardan redirecciones al login. Si en el mismo navegador entra otro usuario, se borran los datos guardados del anterior.
+- **Gastos y pagos sin conexión** (`public/outbox.js`, `shared/pending.js`): al crear un gasto o un pago se guarda primero en el móvil (IndexedDB) y después se envía. Si no hay red, queda "pendiente de enviar", se ve en la lista y ya cuenta en los saldos; se envía solo al abrir la app, al volver la red o cada 30 s si la red está lenta. Reenviar nunca duplica (mismo UUID, API idempotente). Antes de sincronizar se confirma la sesión con el servidor. Lo que el servidor rechace queda marcado para descartarlo. Editar y borrar siguen necesitando conexión.
 
 ## Iconos
 
