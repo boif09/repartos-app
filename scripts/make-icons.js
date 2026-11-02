@@ -1,4 +1,4 @@
-// Genera los iconos PNG de la PWA (símbolo ÷ blanco sobre verde) sin dependencias.
+// Genera los iconos PNG de la PWA (símbolo ÷ blanco sobre azul) sin dependencias.
 // Uso: node scripts/make-icons.js   (los PNG resultantes se guardan en public/icons/)
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.resolve(__dirname, '..', 'public', 'icons');
 
-const BACKGROUND = [0x0f, 0x76, 0x6e];
+const BACKGROUND = [0x2b, 0x3f, 0xd6];
 const FOREGROUND = [0xff, 0xff, 0xff];
 const SUPERSAMPLE = 4;
 

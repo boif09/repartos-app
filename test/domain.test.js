@@ -29,7 +29,7 @@ test('parseAmount entiende los formatos habituales y rechaza el resto', () => {
 
 test('formatMoney y centsToInput', () => {
   assert.match(formatMoney(123456), /^1\.?234,56\s€$/);
-  assert.match(formatMoney(-500), /^-5,00\s€$/);
+  assert.match(formatMoney(-500), /^−5,00\s€$/);
   assert.equal(centsToInput(1250), '12,50');
   assert.equal(centsToInput(5), '0,05');
   assert.equal(parseAmount(centsToInput(98765)), 98765);

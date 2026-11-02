@@ -34,7 +34,8 @@ function moneyFormatter(currency) {
 
 export function formatMoney(minor, currency = 'EUR') {
   if (!formatters.has(currency)) formatters.set(currency, moneyFormatter(currency));
-  return formatters.get(currency).format(minor / 10 ** currencyExponent(currency));
+  // Signo menos tipográfico (−), no el guion.
+  return formatters.get(currency).format(minor / 10 ** currencyExponent(currency)).replace('-', '−');
 }
 
 // Convierte lo que escribe una persona ("12,5", "1.234,56", "12.50 €") a unidades menores
