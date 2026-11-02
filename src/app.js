@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase } from './database.js';
 import { parseUserList, resolveUser } from './auth.js';
+import { HttpError } from './errors.js';
+import { createRepository } from './repository.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
@@ -39,13 +41,6 @@ export function normalizeBasePath(value) {
   return cleaned === '' ? '/' : cleaned;
 }
 
-class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
 function sendJson(res, status, payload, headers = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -56,11 +51,6 @@ function sendJson(res, status, payload, headers = {}) {
     ...headers,
   });
   res.end(body);
-}
-
-function sendNoContent(res, headers = {}) {
-  res.writeHead(204, { ...SECURITY_HEADERS, 'Cache-Control': 'no-store', ...headers });
-  res.end();
 }
 
 function redirect(res, location) {
@@ -124,6 +114,36 @@ export function createApp(options = {}) {
     allowedUsers: options.auth?.allowedUsers ?? parseUserList(process.env.APP_USERS),
   };
   const prefix = basePath === '/' ? '' : basePath;
+  const repo = createRepository(db);
+
+  // [método, patrón, handler(ctx)] -> handler devuelve [status, body]. ctx = { params, body, me }.
+  const routes = [
+    ['GET', /^\/people$/, () => [200, { people: repo.listPeople() }]],
+    ['POST', /^\/people$/, ({ body }) => [200, { person: repo.findOrCreatePerson(body.name) }]],
+    ['PATCH', /^\/people\/(\d+)$/, ({ params, body }) => [200, { person: repo.renamePerson(params[0], body.name) }]],
+
+    ['GET', /^\/groups$/, ({ me }) => [200, { groups: repo.listGroups(me.id) }]],
+    ['POST', /^\/groups$/, ({ body, me }) => [201, repo.createGroup(body, me.id)]],
+    ['GET', /^\/groups\/(\d+)$/, ({ params, me }) => [200, repo.getGroupBundle(params[0], me.id)]],
+    ['PATCH', /^\/groups\/(\d+)$/, ({ params, body, me }) => [200, repo.updateGroup(params[0], body, me.id)]],
+    ['POST', /^\/groups\/(\d+)\/members$/, ({ params, body, me }) => [200, repo.addMember(params[0], body, me.id)]],
+    ['DELETE', /^\/groups\/(\d+)\/members\/(\d+)$/, ({ params, me }) => [200, repo.removeMember(params[0], params[1], me.id)]],
+
+    ['POST', /^\/groups\/(\d+)\/expenses$/, ({ params, body }) => {
+      const { created, expense } = repo.createExpense(params[0], body);
+      return [created ? 201 : 200, { expense }];
+    }],
+    ['PUT', /^\/expenses\/([\w-]+)$/, ({ params, body }) => [200, { expense: repo.updateExpense(params[0], body) }]],
+    ['DELETE', /^\/expenses\/([\w-]+)$/, ({ params, body }) => [200, { expense: repo.deleteExpense(params[0], body) }]],
+    ['POST', /^\/expenses\/([\w-]+)\/restore$/, ({ params }) => [200, { expense: repo.restoreExpense(params[0]) }]],
+
+    ['POST', /^\/groups\/(\d+)\/settlements$/, ({ params, body }) => {
+      const { created, settlement } = repo.createSettlement(params[0], body);
+      return [created ? 201 : 200, { settlement }];
+    }],
+    ['DELETE', /^\/settlements\/([\w-]+)$/, ({ params }) => [200, { settlement: repo.deleteSettlement(params[0]) }]],
+    ['POST', /^\/settlements\/([\w-]+)\/restore$/, ({ params }) => [200, { settlement: repo.restoreSettlement(params[0]) }]],
+  ];
 
   async function handleApi(req, res, route) {
     const method = req.method;
@@ -146,10 +166,27 @@ export function createApp(options = {}) {
       throw new HttpError(401, 'Necesitas iniciar sesión.');
     }
 
+    const me = repo.ensureAuthPerson(user);
+
     if (route === '/session' && method === 'GET') {
-      return sendJson(res, 200, { user });
+      return sendJson(res, 200, { user, person: me });
     }
 
+    let pathMatched = false;
+    for (const [routeMethod, pattern, handler] of routes) {
+      const match = pattern.exec(route);
+      if (!match) continue;
+      pathMatched = true;
+      if (routeMethod !== method) continue;
+      const body = method === 'GET' ? {} : await readJsonBody(req);
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        throw new HttpError(400, 'El cuerpo de la petición debe ser un objeto JSON.');
+      }
+      const [status, payload] = handler({ params: match.slice(1), body, me });
+      return sendJson(res, status, payload);
+    }
+
+    if (pathMatched) throw new HttpError(405, 'Método no permitido.');
     throw new HttpError(404, 'API no encontrada.');
   }
 
@@ -176,7 +213,10 @@ export function createApp(options = {}) {
       const status = error.status || 500;
       if (status >= 500) console.error(error);
       if (res.headersSent) return res.destroy();
-      sendJson(res, status, { error: status >= 500 ? 'Error interno del servidor.' : error.message });
+      sendJson(res, status, {
+        error: status >= 500 ? 'Error interno del servidor.' : error.message,
+        ...(status < 500 && error.details ? error.details : {}),
+      });
     }
   });
 

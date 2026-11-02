@@ -55,7 +55,7 @@ test('health es público y el resto de la API exige usuario de Authelia', async 
 
   result = await call(baseUrl, '/api/session', { user: 'Xavi' });
   assert.equal(result.response.status, 200);
-  assert.deepEqual(result.json, { user: 'xavi' });
+  assert.equal(result.json.user, 'xavi');
 
   result = await call(baseUrl, '/api/no-existe', { user: 'judit' });
   assert.equal(result.response.status, 404);
@@ -67,7 +67,7 @@ test('health es público y el resto de la API exige usuario de Authelia', async 
 test('usuario de desarrollo', async (t) => {
   const baseUrl = await startApp(t, { auth: { devUser: 'judit', allowedUsers: [] } });
   const result = await call(baseUrl, '/api/session');
-  assert.deepEqual(result.json, { user: 'judit' });
+  assert.equal(result.json.user, 'judit');
 });
 
 test('las escrituras sin JSON se rechazan (protección CSRF)', async (t) => {
@@ -111,7 +111,7 @@ test('también funciona bajo una subruta', async (t) => {
   assert.equal(result.response.status, 200);
 
   result = await call(baseUrl, '/repartos/api/session', { user: 'xavi' });
-  assert.deepEqual(result.json, { user: 'xavi' });
+  assert.equal(result.json.user, 'xavi');
 
   result = await call(baseUrl, '/otra/app.js');
   assert.equal(result.response.status, 404);

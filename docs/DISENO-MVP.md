@@ -214,13 +214,13 @@ En la pantalla de saldos, cada pago sugerido lleva el botón **"Marcar como paga
 - **Gastos y liquidaciones**: borrado suave (`deleted_at`), con un aviso de "Deshacer" de unos 5 s y una papelera por grupo.
 - **Quitar a alguien de un grupo**: solo si no aparece en ningún gasto ni liquidación activos.
 - **Personas**: se pueden renombrar y archivar, pero nunca borrar si tienen historial.
-- **Grupos**: se pueden archivar cuando están liquidados (todos los saldos a 0). Aparecen en "Archivados".
+- **Grupos**: se pueden archivar cuando están liquidados (todos los saldos a 0). Aparecen en "Archivados" y son de solo lectura: lo único que admiten es desarchivarse.
 
 ### 4.6 Concurrencia
 
 - Cada cambio es una transacción SQLite.
 - **Crear es idempotente**: el UUID lo genera el móvil. Si la red falla y se reintenta, no se duplica el gasto, algo importante con conexiones inestables.
-- **Editar requiere `version`**. Si otro dispositivo lo cambió antes, se devuelve 409 y la app avisa "Este gasto ha cambiado, recárgalo". Nunca gana el último en silencio.
+- **Editar y borrar requieren `version`**. Si otro dispositivo lo cambió antes, se devuelve 409 y la app avisa "Este gasto ha cambiado, recárgalo". Nunca gana el último en silencio.
 
 ---
 
@@ -251,7 +251,7 @@ Todo bajo `/api`, en JSON. Todas las rutas requieren usuario de Authelia salvo `
 | POST / DELETE | `/groups/:id/members[/:personId]` | Añadir o quitar miembros |
 | GET | `/groups/:id/expenses?before=…` | Gastos paginados por fecha |
 | POST | `/groups/:id/expenses` | Crear (con UUID del cliente) |
-| PUT / DELETE | `/expenses/:id` | Editar (con `version`) o borrar (suave) |
+| PUT / DELETE | `/expenses/:id` | Editar o borrar (suave); ambos exigen `version` |
 | POST | `/expenses/:id/restore` | Deshacer un borrado |
 | GET | `/groups/:id/balances` | Saldos, deudas por pares y pagos sugeridos |
 | POST | `/groups/:id/settlements` | Registrar un pago |

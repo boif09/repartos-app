@@ -9,7 +9,7 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 | Fase | Contenido | Estado |
 |---|---|---|
 | F0 | Esqueleto, login con Authelia, migraciones, tests, pm2/nginx de ejemplo | ✅ |
-| F1 | Personas, grupos, gastos a partes iguales, saldos, liquidaciones | Pendiente |
+| F1 | Personas, grupos, gastos a partes iguales (entre todos o algunos), saldos, pagos sugeridos, liquidaciones | ✅ |
 | F2 | Repartos por subconjunto, importes exactos y partes | Pendiente |
 | F3 | Divisas | Pendiente |
 | F4 | PWA, offline de lectura, enlace para amigos | Pendiente |
@@ -83,7 +83,8 @@ server.js            Arranque y validación de configuración
 src/app.js           Router HTTP, estáticos, cabeceras de seguridad, API
 src/auth.js          Usuario de Authelia (cabecera Remote-User)
 src/database.js      SQLite y migraciones (PRAGMA user_version)
-shared/              Dominio común servidor/navegador (a partir de F1)
+src/repository.js    Consultas, validación y transacciones
+shared/              Dominio común servidor/navegador: dinero, repartos, saldos, minimizar pagos
 public/              Frontend vanilla, diseñado para móvil primero
 test/                node:test
 docs/                Diseño
