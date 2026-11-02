@@ -22,14 +22,27 @@ let renderToken = 0;
 
 class SessionExpiredError extends Error {}
 
-async function api(pathName, { method = 'GET', body } = {}) {
-  const response = await fetch(`api/${pathName}`, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    credentials: 'same-origin',
-    redirect: 'manual',
-  });
+// La vista de amigos vive en /s/#token: la API está un nivel por encima.
+const SHARED_MODE = /\/s\/$/.test(location.pathname);
+const API_ROOT = SHARED_MODE ? '../api/' : 'api/';
+const OFFLINE_WRITE = 'Sin conexión: no se puede guardar ahora. Inténtalo cuando vuelva la cobertura.';
+
+async function api(pathName, { method = 'GET', body, headers = {} } = {}) {
+  if (method !== 'GET' && !navigator.onLine) throw new Error(OFFLINE_WRITE);
+  let response;
+  try {
+    response = await fetch(`${API_ROOT}${pathName}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: 'same-origin',
+      redirect: 'manual',
+    });
+  } catch {
+    throw new Error(method === 'GET' ? 'Sin conexión y sin datos guardados para esta pantalla.' : OFFLINE_WRITE);
+  }
+  // El service worker marca las respuestas que salen de la caché por falta de red.
+  if (method === 'GET') setOfflineData(response.headers.get('X-Repartos-Offline') === '1');
   if (response.type === 'opaqueredirect' || response.status === 401) {
     throw new SessionExpiredError('La sesión ha caducado.');
   }
@@ -41,6 +54,22 @@ async function api(pathName, { method = 'GET', body } = {}) {
     throw error;
   }
   return data;
+}
+
+let offlineData = false;
+const offlineBanner = document.createElement('div');
+offlineBanner.className = 'offline-banner';
+offlineBanner.setAttribute('role', 'status');
+
+function setOfflineData(value) {
+  offlineData = value;
+  updateOfflineBanner();
+}
+
+function updateOfflineBanner() {
+  const offline = !navigator.onLine || offlineData;
+  offlineBanner.textContent = offline ? 'Sin conexión · viendo los últimos datos guardados' : '';
+  document.body.classList.toggle('is-offline', offline);
 }
 
 // Crea elementos sin innerHTML: los datos nunca se interpretan como HTML.
@@ -146,7 +175,7 @@ function plural(count, one, many) {
 }
 
 function personName(people, id) {
-  if (id === session.person.id) return 'Tú';
+  if (session && id === session.person.id) return 'Tú';
   return people.get(id)?.name ?? '¿?';
 }
 
@@ -240,7 +269,8 @@ async function groupsView() {
           el('p', { text: 'Crea uno para la pareja, un viaje o un finde con amigos.' })),
       archived.length > 0 && el('details', { class: 'archived' },
         el('summary', { text: `Archivados (${archived.length})` }),
-        archived.map(card))),
+        archived.map(card)),
+      el('a', { class: 'btn ghost block', href: '#/personas', text: 'Personas y saldos' })),
     el('a', { class: 'fab', href: '#/nuevo-grupo', text: '+ Nuevo grupo' }));
 }
 
@@ -333,7 +363,8 @@ function timeline(bundle, people) {
       el('p', { text: 'Pulsa + para añadir el primero.' }));
   }
 
-  const meId = session.person.id;
+  const meId = session?.person.id ?? null;
+  const editable = !bundle.group.archived && !SHARED_MODE;
   const cur = bundle.group.baseCurrency;
   const list = el('div', { class: 'timeline' });
   let currentDay = null;
@@ -345,13 +376,14 @@ function timeline(bundle, people) {
     if (item.type === 'expense') {
       const expense = item.data;
       const myShare = expense.shares.find((share) => share.personId === meId)?.owedCents ?? 0;
-      let impact;
-      if (expense.payerId === meId) impact = { text: `prestaste ${formatMoney(expense.amountCents - myShare, cur)}`, tone: 'positive' };
+      let impact = null;
+      if (meId === null) impact = null;
+      else if (expense.payerId === meId) impact = { text: `prestaste ${formatMoney(expense.amountCents - myShare, cur)}`, tone: 'positive' };
       else if (myShare > 0) impact = { text: `debes ${formatMoney(myShare, cur)}`, tone: 'negative' };
       else impact = { text: 'no participas', tone: 'muted' };
       list.append(el('a', {
         class: 'row',
-        href: bundle.group.archived ? undefined : `#/g/${bundle.group.id}/gasto/${expense.id}`,
+        href: editable ? `#/g/${bundle.group.id}/gasto/${expense.id}` : undefined,
       },
       el('span', { class: 'row-main' },
         el('strong', { text: expense.description }),
@@ -359,13 +391,13 @@ function timeline(bundle, people) {
       el('span', { class: 'row-side' },
         el('strong', { text: formatMoney(expense.originalMinor, expense.currency) }),
         expense.currency !== cur && el('span', { class: 'muted small', text: `≈ ${formatMoney(expense.amountCents, cur)}` }),
-        el('span', { class: `small ${impact.tone}`, text: impact.text }))));
+        impact && el('span', { class: `small ${impact.tone}`, text: impact.text }))));
     } else {
       const settlement = item.data;
       list.append(el('button', {
         type: 'button',
         class: 'row settlement',
-        disabled: bundle.group.archived,
+        disabled: !editable,
         onClick: () => deleteSettlement(bundle, settlement, people),
       },
       el('span', { class: 'row-main' },
@@ -397,13 +429,13 @@ async function deleteSettlement(bundle, settlement, people) {
 
 function balancesPanel(bundle, people) {
   const groupId = bundle.group.id;
-  const writable = !bundle.group.archived;
+  const writable = !bundle.group.archived && !SHARED_MODE;
   const balances = [...bundle.balances].sort((a, b) => b.amountCents - a.amountCents);
   const cur = bundle.group.baseCurrency;
 
   return el('div', { class: 'stack' },
     el('div', { class: 'card list' },
-      balances.map(({ personId, amountCents }) => el('div', { class: 'row static' },
+      balances.map(({ personId, amountCents }) => el(SHARED_MODE ? 'div' : 'a', { class: 'row static', href: SHARED_MODE ? undefined : `#/p/${personId}` },
         el('span', { class: 'row-main' }, el('strong', { text: personName(people, personId) })),
         el('span', {
           class: `amount ${amountCents > 0 ? 'positive' : amountCents < 0 ? 'negative' : 'muted'}`,
@@ -1073,6 +1105,7 @@ async function settingsView(groupId) {
         simplify),
 
       writable && bundle.members.length > 1 && defaultSplitCard(bundle, patch),
+      shareCard(bundle),
 
       el('h2', { class: 'section-title', text: `Personas (${bundle.members.length})` }),
       el('div', { class: 'card list' },
@@ -1111,6 +1144,153 @@ async function settingsView(groupId) {
   });
 }
 
+function shareUrl(token) {
+  return new URL(`s/#${token}`, location.href.split('#')[0]).href;
+}
+
+// Enlace de solo lectura para amigos: ven gastos, saldos y pagos sugeridos, sin poder tocar nada.
+function shareCard(bundle) {
+  const groupId = bundle.group.id;
+  const token = bundle.group.shareToken;
+  const change = async (method, message, question) => {
+    if (question && !window.confirm(question)) return;
+    try {
+      await api(`groups/${groupId}/share`, { method, body: {} });
+      toast(message);
+      render();
+    } catch (error) {
+      handleError(error);
+    }
+  };
+  const intro = el('span', {},
+    el('strong', { text: 'Compartir con amigos' }),
+    el('span', { class: 'muted small block', text: 'Un enlace de solo lectura: quien lo tenga ve los gastos y los saldos, sin registrarse y sin poder cambiar nada.' }));
+  if (!token) {
+    return el('div', { class: 'card stack' }, intro,
+      el('button', { type: 'button', class: 'btn secondary block', text: 'Crear enlace', onClick: () => change('POST', 'Enlace creado') }));
+  }
+
+  const url = shareUrl(token);
+  const input = el('input', { type: 'text', readOnly: true, value: url, class: 'share-url', 'aria-label': 'Enlace para compartir', onFocus: () => input.select() });
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Enlace copiado');
+    } catch {
+      input.select();
+      toast('Selecciona el enlace y cópialo.');
+    }
+  };
+  return el('div', { class: 'card stack' }, intro, input,
+    el('div', { class: 'inline-form' },
+      navigator.share && el('button', {
+        type: 'button',
+        class: 'btn secondary',
+        text: 'Compartir',
+        onClick: () => navigator.share({ title: bundle.group.title, text: `Gastos de ${bundle.group.title}`, url }).catch(() => {}),
+      }),
+      el('button', { type: 'button', class: 'btn secondary', text: 'Copiar', onClick: copy })),
+    el('div', { class: 'field-row' },
+      el('button', { type: 'button', class: 'link-btn', text: 'Cambiar enlace', onClick: () => change('POST', 'Enlace cambiado', 'El enlace actual dejará de funcionar. ¿Crear uno nuevo?') }),
+      el('button', { type: 'button', class: 'link-btn danger', text: 'Dejar de compartir', onClick: () => change('DELETE', 'Ya no se comparte', '¿Dejar de compartir? El enlace dejará de funcionar.') })));
+}
+
+// Vista de amigos (/s/#token): sin sesión, solo lectura.
+async function sharedView(token) {
+  loading();
+  let bundle;
+  try {
+    bundle = await api('shared', { headers: { 'X-Share-Token': token } });
+  } catch (error) {
+    mount(el('section', { class: 'content' }, el('div', { class: 'card empty' },
+      el('h2', { text: 'Enlace no disponible' }),
+      el('p', { text: error.message }))));
+    return;
+  }
+  const people = new Map(bundle.members.map((person) => [person.id, person]));
+  document.title = `${bundle.group.title} · Repartos`;
+  const panel = el('div', { class: 'stack' });
+  const tabs = el('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Secciones' });
+  const show = (which) => {
+    tabs.querySelectorAll('button').forEach((button) => button.setAttribute('aria-checked', String(button.dataset.tab === which)));
+    panel.replaceChildren(which === 'saldos' ? balancesPanel(bundle, people) : timeline(bundle, people));
+  };
+  for (const [value, label] of [['saldos', 'Saldos'], ['gastos', 'Gastos']]) {
+    tabs.append(el('button', { type: 'button', role: 'radio', 'data-tab': value, text: label, onClick: () => show(value) }));
+  }
+  mount(
+    el('header', { class: 'topbar' },
+      el('span', { class: 'brand-dot', 'aria-hidden': 'true', text: '÷' }),
+      el('h1', { text: `${bundle.group.emoji || '👥'} ${bundle.group.title}` })),
+    el('section', { class: 'content' },
+      el('div', { class: 'banner', text: `Solo lectura · ${plural(bundle.members.length, 'persona', 'personas')} · importes en ${bundle.group.baseCurrency}` }),
+      tabs,
+      panel));
+  show('saldos');
+}
+
+async function peopleView() {
+  const { people } = await api('people');
+  mount(
+    topbar({ title: 'Personas', back: '#/' }),
+    el('section', { class: 'content' },
+      el('p', { class: 'muted small', text: 'Toca una persona para ver sus saldos en todos los grupos.' }),
+      el('div', { class: 'card list' },
+        people.map((person) => el('a', { class: 'row', href: `#/p/${person.id}` },
+          el('span', { class: 'row-main' }, el('strong', { text: person.id === session.person.id ? `${person.name} (tú)` : person.name })),
+          el('span', { class: 'muted', 'aria-hidden': 'true', text: '›' }))))));
+}
+
+// Saldo de una persona en cada grupo y el total por moneda (solo grupos activos).
+async function personView(personId) {
+  const summary = await api(`people/${personId}/summary`);
+  const { person } = summary;
+  const isMe = person.id === session.person.id;
+  const describe = (cents, currency) => {
+    if (cents > 0) return { text: `${isMe ? 'Te deben' : 'Le deben'} ${formatMoney(cents, currency)}`, tone: 'positive' };
+    if (cents < 0) return { text: `${isMe ? 'Debes' : 'Debe'} ${formatMoney(-cents, currency)}`, tone: 'negative' };
+    return { text: 'En paz', tone: 'muted' };
+  };
+
+  const name = el('input', { type: 'text', maxLength: 40, value: person.name, 'aria-label': 'Nombre' });
+  const rename = async () => {
+    try {
+      await api(`people/${person.id}`, { method: 'PATCH', body: { name: name.value } });
+      if (isMe) session.person.name = name.value.trim();
+      toast('Nombre actualizado');
+      render();
+    } catch (error) {
+      handleError(error);
+    }
+  };
+
+  mount(
+    topbar({ title: isMe ? `${person.name} (tú)` : person.name, back: '#/personas' }),
+    el('section', { class: 'content' },
+      el('div', { class: 'card summary' },
+        el('span', { class: 'muted small', text: 'Total en grupos activos' }),
+        summary.totals.length
+          ? summary.totals.map(({ currency, amountCents }) => {
+            const total = describe(amountCents, currency);
+            return el('strong', { class: `big ${total.tone}`, text: total.text });
+          })
+          : el('strong', { class: 'big', text: 'Sin grupos activos' })),
+      el('h2', { class: 'section-title', text: `Grupos (${summary.groups.length})` }),
+      summary.groups.length
+        ? el('div', { class: 'card list' },
+          summary.groups.map((group) => {
+            const balance = describe(group.balanceCents, group.baseCurrency);
+            return el('a', { class: 'row', href: `#/g/${group.id}/saldos` },
+              el('span', { class: 'row-main' },
+                el('strong', { text: `${group.emoji || '👥'} ${group.title}` }),
+                group.archived && el('span', { class: 'muted small', text: 'Archivado' })),
+              el('span', { class: `amount small ${balance.tone}`, text: balance.text }));
+          }))
+        : el('div', { class: 'card empty' }, el('p', { text: 'No está en ningún grupo.' })),
+      el('h2', { class: 'section-title', text: 'Nombre' }),
+      el('div', { class: 'inline-form' }, name, el('button', { type: 'button', class: 'btn secondary', text: 'Guardar', onClick: rename }))));
+}
+
 // ---------- Router ----------
 
 const ROUTES = [
@@ -1122,6 +1302,8 @@ const ROUTES = [
   [/^\/g\/(\d+)\/gasto\/([\w-]+)$/, ([id, expenseId]) => expenseFormView(id, expenseId)],
   [/^\/g\/(\d+)\/pago$/, ([id], query) => settlementFormView(id, query)],
   [/^\/g\/(\d+)\/ajustes$/, ([id]) => settingsView(id)],
+  [/^\/personas$/, () => peopleView()],
+  [/^\/p\/(\d+)$/, ([id]) => personView(id)],
 ];
 
 async function render() {
@@ -1145,10 +1327,42 @@ async function render() {
   }
 }
 
+// Los datos guardados para consultar sin conexión son de quien inició sesión. Si en este navegador
+// entra otra persona (con conexión), se borran antes de que pueda verlos sin red.
+function forgetOtherUsersData(user) {
+  if (offlineData) return;
+  let previous = null;
+  try {
+    previous = localStorage.getItem('repartos-user');
+    localStorage.setItem('repartos-user', user);
+  } catch {
+    return;
+  }
+  if (previous && previous !== user) {
+    navigator.serviceWorker?.controller?.postMessage({ type: 'forget-api-data' });
+  }
+}
+
 async function init() {
+  document.body.prepend(offlineBanner);
+  window.addEventListener('online', () => {
+    updateOfflineBanner();
+    if (!SHARED_MODE) render();
+  });
+  window.addEventListener('offline', updateOfflineBanner);
+  updateOfflineBanner();
+
+  if (SHARED_MODE) {
+    sharedView(location.hash.replace(/^#/, ''));
+    return;
+  }
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
   try {
     session = await api('session');
     sessionStorage.removeItem('repartos-reloaded');
+    forgetOtherUsersData(session.user);
   } catch (error) {
     if (error instanceof SessionExpiredError && !sessionStorage.getItem('repartos-reloaded')) {
       // Evita un bucle de recargas si el servidor responde 401 sin pasar por Authelia (p. ej. en local).

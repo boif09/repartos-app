@@ -14,7 +14,7 @@ async function startApp(t) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
-  return async function call(method, pathName, body, user = 'xavi') {
+  const call = async function call(method, pathName, body, user = 'xavi') {
     const response = await fetch(`${baseUrl}/api${pathName}`, {
       method,
       headers: { 'Content-Type': 'application/json', 'Remote-User': user },
@@ -23,6 +23,8 @@ async function startApp(t) {
     const json = await response.json();
     return { status: response.status, ...json };
   };
+  call.baseUrl = baseUrl;
+  return call;
 }
 
 const today = '2026-11-02';
@@ -283,4 +285,76 @@ test('el reparto por defecto ignora a quien ya no está en el grupo', async (t) 
   await call('PATCH', `/groups/${group.id}`, { defaultSplit: [{ personId: xavi.id, weight: 2 }] });
   bundle = await call('GET', `/groups/${group.id}`);
   assert.deepEqual(bundle.group.defaultSplit, [{ personId: xavi.id, weight: 2 }]);
+});
+
+test('enlace para amigos: crear, ver sin sesión, cambiar y revocar', async (t) => {
+  const call = await startApp(t);
+  const { person: xavi } = await call('GET', '/session');
+  const { group, members } = await call('POST', '/groups', { title: 'Finde', members: [{ name: 'Ana' }] });
+  const ana = members.find((m) => m.name === 'Ana');
+  await call('POST', `/groups/${group.id}/expenses`, {
+    id: crypto.randomUUID(), description: 'Cena', spentOn: today, payerId: xavi.id, amountCents: 4000,
+    splitMode: 'equal', shares: [{ personId: xavi.id }, { personId: ana.id }], notes: 'privado',
+  });
+  assert.equal(group.shareToken, null);
+
+  let bundle = await call('POST', `/groups/${group.id}/share`, {});
+  const token = bundle.group.shareToken;
+  assert.match(token, /^[A-Za-z0-9_-]{22}$/);
+
+  // Sin cabecera Remote-User: como un amigo desde internet.
+  const anon = (pathName, shareToken) => fetch(`${call.baseUrl}/api${pathName}`, { headers: shareToken === undefined ? {} : { 'X-Share-Token': shareToken } })
+    .then(async (r) => ({ status: r.status, headers: r.headers, ...(await r.json()) }));
+  let shared = await anon('/shared', token);
+  assert.equal(shared.status, 200);
+  assert.equal(shared.group.title, 'Finde');
+  assert.equal(shared.group.shareToken, undefined, 'el token no se reenvía');
+  assert.deepEqual(Object.keys(shared.members[0]).sort(), ['id', 'name'], 'sin usuarios de Authelia');
+  assert.equal(shared.expenses[0].notes, undefined, 'sin notas privadas');
+  assert.equal(shared.transfers.length, 1);
+  assert.equal(shared.headers.get('x-robots-tag'), 'noindex');
+  assert.equal((await anon(`/groups/${group.id}`)).status, 401, 'el resto de la API sigue cerrada');
+
+  assert.equal((await anon(`/shared/${token}`)).status, 401, 'el token en la URL no sirve (va en cabecera): esa ruta es privada');
+  const writeAttempt = await fetch(`${call.baseUrl}/api/shared`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Share-Token': token }, body: '{}' });
+  assert.equal(writeAttempt.status, 405);
+
+  bundle = await call('POST', `/groups/${group.id}/share`, {});
+  assert.notEqual(bundle.group.shareToken, token);
+  assert.equal((await anon('/shared', token)).status, 404, 'el enlace anterior deja de funcionar');
+
+  bundle = await call('DELETE', `/groups/${group.id}/share`, {});
+  assert.equal(bundle.group.shareToken, null);
+  shared = await anon('/shared', bundle.group.shareToken ?? '');
+  assert.equal(shared.status, 404);
+  assert.equal((await anon('/shared', 'no-valido')).status, 404);
+  assert.equal((await anon('/shared')).status, 404, 'sin token');
+});
+
+test('ficha de persona: saldo en cada grupo y total por moneda de los activos', async (t) => {
+  const call = await startApp(t);
+  const { person: xavi } = await call('GET', '/session');
+  const a = await call('POST', '/groups', { title: 'Piso', members: [{ name: 'Ana' }] });
+  const ana = a.members.find((m) => m.name === 'Ana');
+  const b = await call('POST', '/groups', { title: 'Viaje USA', baseCurrency: 'USD', members: [{ personId: ana.id }] });
+  const c = await call('POST', '/groups', { title: 'Cena', members: [{ personId: ana.id }] });
+  const expense = (groupId, amountCents) => call('POST', `/groups/${groupId}/expenses`, {
+    id: crypto.randomUUID(), description: 'X', spentOn: today, payerId: xavi.id, amountCents,
+    splitMode: 'equal', shares: [{ personId: xavi.id }, { personId: ana.id }],
+  });
+  await expense(a.group.id, 3000);
+  await expense(b.group.id, 5000);
+  await expense(c.group.id, 1000);
+
+  const summary = await call('GET', `/people/${ana.id}/summary`);
+  assert.equal(summary.person.name, 'Ana');
+  assert.equal(summary.groups.length, 3);
+  assert.deepEqual(summary.groups.map((g) => [g.title, g.balanceCents]).sort(), [['Cena', -500], ['Piso', -1500], ['Viaje USA', -2500]]);
+  assert.deepEqual(summary.totals.sort((x, y) => x.currency.localeCompare(y.currency)), [
+    { currency: 'EUR', amountCents: -2000 },
+    { currency: 'USD', amountCents: -2500 },
+  ]);
+  assert.equal(summary.groups[0].shareToken, undefined);
+
+  assert.equal((await call('GET', '/people/9999/summary')).status, 404);
 });

@@ -4,7 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0f766e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Repartos">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Repartos</title>
+  <!-- use-credentials: detrás de Authelia, el manifest necesita la cookie de sesión -->
+  <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="app.js"></script>
 </head>

@@ -12,7 +12,7 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 | F1 | Personas, grupos, gastos a partes iguales (entre todos o algunos), saldos, pagos sugeridos, liquidaciones | ✅ |
 | F2 | Importes exactos (con "repartir lo que falta"), partes y reparto por defecto del grupo | ✅ |
 | F3 | Moneda por grupo y por gasto, tipo del BCE (Frankfurter) con caché, tipo manual y "me cobraron" | ✅ |
-| F4 | PWA, offline de lectura, enlace para amigos | Pendiente |
+| F4 | PWA instalable, consulta sin conexión, enlace de solo lectura para amigos, ficha de persona | ✅ |
 | F5 | Despliegue y backups | Pendiente |
 
 ## Requisitos
@@ -69,6 +69,12 @@ Además:
 - Las escrituras exigen `Content-Type: application/json`.
 - CSP estricta, sin JS ni CSS inline.
 - Si la sesión de Authelia caduca, la app recarga la página para volver a pasar por el login.
+- **Enlace para amigos** (`/s/#token`): token aleatorio de 128 bits por grupo. Va en el `#` de la URL y la app lo manda a la API en la cabecera `X-Share-Token`, así nunca aparece en los logs de acceso. Solo lectura: gastos, saldos y pagos sugeridos, sin notas ni usuarios de Authelia. Se puede cambiar o revocar desde los ajustes del grupo. En nginx esas rutas van sin Authelia, solo con GET y con `Remote-User` vaciado.
+- **Sin conexión**: el service worker guarda la app y las últimas lecturas de la API para consultarlas sin red (a propósito, aunque la API responda `no-store`). Las escrituras necesitan conexión y nunca se guardan redirecciones al login. Si en el mismo navegador entra otro usuario, se borran los datos guardados del anterior.
+
+## Iconos
+
+Los PNG de `public/icons/` se generan con `node scripts/make-icons.js` (sin dependencias).
 
 ## Despliegue en repartos.jusboif.es (resumen; el script llega en F5)
 
@@ -87,7 +93,8 @@ src/database.js      SQLite y migraciones (PRAGMA user_version)
 src/fx.js            Tipos de cambio del BCE con caché en SQLite
 src/repository.js    Consultas, validación y transacciones
 shared/              Dominio común servidor/navegador: dinero, repartos, saldos, minimizar pagos
-public/              Frontend vanilla, diseñado para móvil primero
+public/              Frontend vanilla (móvil primero), manifest y service worker (sw.js)
+scripts/             make-icons.js: genera los iconos PNG
 test/                node:test
 docs/                Diseño
 ```

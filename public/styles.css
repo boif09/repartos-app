@@ -470,6 +470,30 @@ select:disabled { opacity: .7; }
 .converted { font-size: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; padding-bottom: 12px; }
 .converted:empty { display: none; }
 
+/* ---------- Sin conexión, compartir ---------- */
+
+.offline-banner:empty { display: none; }
+.offline-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  padding: calc(4px + env(safe-area-inset-top)) 16px 4px;
+  background: #b45309;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+body.is-offline .app { padding-top: 26px; }
+body.is-offline .topbar { top: 26px; }
+body.is-offline .fab, body.is-offline button[type="submit"] { opacity: .6; }
+
+.share-url { font-size: 14px !important; color: var(--muted) !important; }
+a.row.static { cursor: pointer; }
+a.row.static:active { background: var(--surface-2); }
+
 /* ---------- Aviso flotante ---------- */
 
 .toast {

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { badRequest, conflict, notFound } from './errors.js';
 import { MAX_CENTS, currencyExponent, isCurrencyCode } from '../shared/money.js';
 import { convertMinor, parseRate } from '../shared/fx.js';
@@ -76,8 +77,11 @@ const toGroup = (row) => ({
   baseCurrency: row.base_currency,
   simplifyDebts: row.simplify_debts === 1,
   defaultSplit: parseDefaultSplit(row.default_split),
+  shareToken: row.share_token ?? null,
   archived: row.archived_at !== null,
 });
+
+const SHARE_TOKEN = /^[A-Za-z0-9_-]{22}$/;
 
 // Reparto por defecto del grupo (p. ej. 60/40 en Pareja): [{ personId, weight }] o null = a partes iguales.
 function parseDefaultSplit(value) {
@@ -259,6 +263,55 @@ export function createRepository(db) {
       balances: [...balances].map(([personId, amountCents]) => ({ personId, amountCents })),
       transfers,
       myBalanceCents: balances.has(meId) ? balances.get(meId) : null,
+    };
+  }
+
+  // ---------- Enlace de solo lectura para amigos ----------
+
+  // Token aleatorio de 128 bits. Regenerarlo invalida el enlace anterior; null deja de compartir.
+  function setShareLink(groupId, enabled, meId) {
+    const row = getGroupRow(groupId);
+    const token = enabled ? crypto.randomBytes(16).toString('base64url') : null;
+    db.prepare('UPDATE expense_groups SET share_token = ? WHERE id = ?').run(token, row.id);
+    return getGroupBundle(row.id, meId);
+  }
+
+  // Lo que ve un amigo con el enlace: sin token, sin usuarios de Authelia y sin "yo".
+  function getSharedBundle(token) {
+    const row = SHARE_TOKEN.test(String(token)) ? db.prepare('SELECT * FROM expense_groups WHERE share_token = ?').get(token) : null;
+    if (!row) throw notFound('Este enlace no existe o ya no está compartido.');
+    const bundle = getGroupBundle(row.id, null);
+    const { shareToken, defaultSplit, ...group } = bundle.group;
+    return {
+      group,
+      members: bundle.members.map(({ id, name }) => ({ id, name })),
+      expenses: bundle.expenses.map(({ notes, version, deleted, ...expense }) => expense),
+      settlements: bundle.settlements,
+      balances: bundle.balances,
+      transfers: bundle.transfers,
+    };
+  }
+
+  // ---------- Resumen de una persona en todos sus grupos ----------
+
+  function personSummary(personId) {
+    const person = getPersonRow(positiveId(personId, 'Persona'));
+    const rows = db.prepare(`
+      SELECT g.* FROM group_members gm JOIN expense_groups g ON g.id = gm.group_id
+      WHERE gm.person_id = ? ORDER BY g.archived_at IS NOT NULL, g.created_at DESC, g.id DESC
+    `).all(person.id);
+    const totals = new Map();
+    const groups = rows.map((row) => {
+      const { balances } = computeGroupMoney(row.id, false);
+      const balanceCents = balances.get(person.id) ?? 0;
+      if (row.archived_at === null) totals.set(row.base_currency, (totals.get(row.base_currency) || 0) + balanceCents);
+      const { shareToken, ...group } = toGroup(row);
+      return { ...group, balanceCents };
+    });
+    return {
+      person: toPerson(person),
+      groups,
+      totals: [...totals].map(([currency, amountCents]) => ({ currency, amountCents })),
     };
   }
 
@@ -598,6 +651,9 @@ export function createRepository(db) {
     renamePerson,
     listGroups,
     getGroupBundle,
+    setShareLink,
+    getSharedBundle,
+    personSummary,
     createGroup,
     updateGroup,
     addMember,

@@ -116,3 +116,23 @@ test('también funciona bajo una subruta', async (t) => {
   result = await call(baseUrl, '/otra/app.js');
   assert.equal(result.response.status, 404);
 });
+
+test('PWA y vista de amigos: manifest, service worker e iconos se sirven, y /s/ sirve la app', async (t) => {
+  const baseUrl = await startApp(t);
+  for (const [pathName, type] of [
+    ['/manifest.webmanifest', /manifest\+json/],
+    ['/sw.js', /javascript/],
+    ['/icons/icon-192.png', /image\/png/],
+    ['/s/', /text\/html/],
+    ['/s/app.js', /javascript/],
+    ['/s/shared/money.js', /javascript/],
+  ]) {
+    const result = await call(baseUrl, pathName);
+    assert.equal(result.response.status, 200, pathName);
+    assert.match(result.response.headers.get('content-type'), type, pathName);
+  }
+  const manifest = JSON.parse((await call(baseUrl, '/manifest.webmanifest')).text);
+  assert.equal(manifest.display, 'standalone');
+  assert.ok(manifest.icons.some((icon) => icon.purpose === 'maskable'));
+  assert.equal((await call(baseUrl, '/s/..%2F..%2Fsrc%2Fauth.js')).response.status, 404);
+});

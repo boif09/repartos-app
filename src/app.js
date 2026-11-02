@@ -12,8 +12,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 
 // Carpetas servidas como estáticos. "shared/" contiene el dominio común a servidor y navegador.
+// /s/ es la vista de solo lectura para amigos: sirve la misma app (nginx la deja pasar sin Authelia).
 const STATIC_DIRS = [
   { prefix: '/shared/', dir: path.join(projectRoot, 'shared') },
+  { prefix: '/s/shared/', dir: path.join(projectRoot, 'shared') },
+  { prefix: '/s/', dir: path.join(projectRoot, 'public') },
   { prefix: '/', dir: path.join(projectRoot, 'public') },
 ];
 
@@ -124,11 +127,14 @@ export function createApp(options = {}) {
     ['GET', /^\/fx$/, async ({ query }) => [200, await fx.getRate(query.get('from'), query.get('to'), query.get('date'))]],
     ['POST', /^\/people$/, ({ body }) => [200, { person: repo.findOrCreatePerson(body.name) }]],
     ['PATCH', /^\/people\/(\d+)$/, ({ params, body }) => [200, { person: repo.renamePerson(params[0], body.name) }]],
+    ['GET', /^\/people\/(\d+)\/summary$/, ({ params }) => [200, repo.personSummary(params[0])]],
 
     ['GET', /^\/groups$/, ({ me }) => [200, { groups: repo.listGroups(me.id) }]],
     ['POST', /^\/groups$/, ({ body, me }) => [201, repo.createGroup(body, me.id)]],
     ['GET', /^\/groups\/(\d+)$/, ({ params, me }) => [200, repo.getGroupBundle(params[0], me.id)]],
     ['PATCH', /^\/groups\/(\d+)$/, ({ params, body, me }) => [200, repo.updateGroup(params[0], body, me.id)]],
+    ['POST', /^\/groups\/(\d+)\/share$/, ({ params, me }) => [200, repo.setShareLink(params[0], true, me.id)]],
+    ['DELETE', /^\/groups\/(\d+)\/share$/, ({ params, me }) => [200, repo.setShareLink(params[0], false, me.id)]],
     ['POST', /^\/groups\/(\d+)\/members$/, ({ params, body, me }) => [200, repo.addMember(params[0], body, me.id)]],
     ['DELETE', /^\/groups\/(\d+)\/members\/(\d+)$/, ({ params, me }) => [200, repo.removeMember(params[0], params[1], me.id)]],
 
@@ -161,6 +167,13 @@ export function createApp(options = {}) {
 
     if (route === '/health' && method === 'GET') {
       return sendJson(res, 200, { ok: true });
+    }
+
+    // Enlace de amigos: público y de solo lectura (en nginx va sin Authelia).
+    // El token llega en una cabecera, no en la URL, para que no quede en los logs de acceso.
+    if (route === '/shared') {
+      if (method !== 'GET') throw new HttpError(405, 'Método no permitido.');
+      return sendJson(res, 200, repo.getSharedBundle(req.headers['x-share-token']), { 'X-Robots-Tag': 'noindex' });
     }
 
     // A partir de aquí todo requiere un usuario autenticado por Authelia.
