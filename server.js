@@ -1,7 +1,7 @@
 import { createApp } from './src/app.js';
 import { parseUserList } from './src/auth.js';
 
-const port = Number(process.env.PORT || 3014);
+const port = Number(process.env.PORT || 3016);
 // Solo local: la app confía en la cabecera Remote-User que pone nginx tras validar con Authelia.
 const host = process.env.HOST || '127.0.0.1';
 const production = process.env.NODE_ENV === 'production';

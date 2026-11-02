@@ -12,7 +12,7 @@ module.exports = {
       max_memory_restart: '200M',
       env: {
         NODE_ENV: 'production',
-        PORT: '3014',
+        PORT: '3016',
         HOST: '127.0.0.1',
         BASE_PATH: '/',
         APP_USERS: 'xavi,judit',

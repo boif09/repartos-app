@@ -1,0 +1,3 @@
+# Siempre LF: el servidor es Linux y los scripts .sh fallan con CRLF.
+* text=auto eol=lf
+*.png binary

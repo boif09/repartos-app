@@ -13,7 +13,7 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 | F2 | Importes exactos (con "repartir lo que falta"), partes y reparto por defecto del grupo | ✅ |
 | F3 | Moneda por grupo y por gasto, tipo del BCE (Frankfurter) con caché, tipo manual y "me cobraron" | ✅ |
 | F4 | PWA instalable, consulta sin conexión, enlace de solo lectura para amigos, ficha de persona | ✅ |
-| F5 | Despliegue y backups | Pendiente |
+| F5 | Despliegue en `repartos.jusboif.es`, script de despliegue y copias diarias | Preparado ([guía](docs/DESPLIEGUE.md)) |
 
 ## Requisitos
 
@@ -27,7 +27,7 @@ cp .env.example .env
 npm start
 ```
 
-Abrir `http://localhost:3014/`. En local no hay Authelia: `DEV_REMOTE_USER` en `.env` simula el usuario con el que has entrado.
+Abrir `http://localhost:3016/`. En local no hay Authelia: `DEV_REMOTE_USER` en `.env` simula el usuario con el que has entrado.
 
 Con reinicio automático al cambiar archivos:
 
@@ -48,7 +48,7 @@ npm test
 |---|---|---|
 | `APP_USERS` | — (obligatoria en producción) | Usuarios de Authelia que pueden entrar, separados por comas |
 | `DEV_REMOTE_USER` | — | Solo en desarrollo: simula la cabecera `Remote-User`. En producción impide arrancar |
-| `PORT` | `3014` | Puerto interno |
+| `PORT` | `3016` | Puerto interno |
 | `HOST` | `127.0.0.1` | Dirección de escucha. Debe ser local: la app confía en nginx |
 | `BASE_PATH` | `/` | Ruta pública (la app vive en la raíz de `repartos.jusboif.es`) |
 | `DB_PATH` | `data/repartos.db` | Base de datos SQLite |
@@ -76,12 +76,15 @@ Además:
 
 Los PNG de `public/icons/` se generan con `node scripts/make-icons.js` (sin dependencias).
 
-## Despliegue en repartos.jusboif.es (resumen; el script llega en F5)
+## Despliegue
 
-1. **DNS**: registro A `repartos.jusboif.es` → IP del servidor.
-2. **Authelia**: añadir la regla de `repartos.jusboif.es` (está en [nginx-repartos.conf.example](nginx-repartos.conf.example)) y `docker restart authelia`.
-3. **App**: copiar el proyecto, crear `/var/lib/repartos/`, `npm run check && npm test`, `pm2 start ecosystem.config.cjs && pm2 save`.
-4. **nginx y certificado**: `certbot certonly --nginx -d repartos.jusboif.es`, añadir el sitio de [nginx-repartos.conf.example](nginx-repartos.conf.example) y `sudo nginx -t && sudo systemctl reload nginx`.
+Paso a paso en [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md): DNS, pm2, Authelia, certificado, nginx y copia diaria. Las actualizaciones se hacen con `./deploy-repartos.sh`, que hace una copia de la base de datos, actualiza el código, pasa los tests, reinicia y comprueba que la app responde.
+
+Copia manual de la base de datos (consistente, sin parar la app):
+
+```bash
+DB_PATH=/var/lib/repartos/repartos.db BACKUP_DIR=/var/backups/repartos npm run backup
+```
 
 ## Estructura
 
@@ -94,7 +97,8 @@ src/fx.js            Tipos de cambio del BCE con caché en SQLite
 src/repository.js    Consultas, validación y transacciones
 shared/              Dominio común servidor/navegador: dinero, repartos, saldos, minimizar pagos
 public/              Frontend vanilla (móvil primero), manifest y service worker (sw.js)
-scripts/             make-icons.js: genera los iconos PNG
+scripts/             make-icons.js (iconos PNG) y backup-db.js (copia de la base de datos)
+deploy-repartos.sh   Actualización en el servidor
 test/                node:test
 docs/                Diseño
 ```

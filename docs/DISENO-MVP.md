@@ -290,7 +290,7 @@ Detalles de PWA: `manifest.webmanifest` con `display: standalone`, iconos de 192
 
 Igual que TripFlow:
 
-- **pm2**: proceso `repartos`, `HOST=127.0.0.1`, `PORT=3014` (libre en el servidor), `BASE_PATH=/`, `APP_USERS=xavi,judit`, `DB_PATH=/var/lib/repartos/repartos.db` (fuera del directorio del código), `NODE_ENV=production`.
+- **pm2**: proceso `repartos`, `HOST=127.0.0.1`, `PORT=3016` (libre en el servidor), `BASE_PATH=/`, `APP_USERS=xavi,judit`, `DB_PATH=/var/lib/repartos/repartos.db` (fuera del directorio del código), `NODE_ENV=production`.
 - **nginx**: sitio propio `repartos.jusboif.es` con certificado de certbot y los snippets de Authelia, igual que TripFlow.
 - **Authelia**: regla `one_factor` para `repartos.jusboif.es` limitada a `user:xavi` y `user:judit`.
 - **Backup**: `sqlite3 repartos.db ".backup …"` (o `VACUUM INTO`) diario por cron, con rotación de 30 días. No hace falta parar la app.
