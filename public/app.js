@@ -1,7 +1,7 @@
 // SPA vanilla con rutas por hash. Las rutas de red son relativas al documento, así la app
 // funciona bajo cualquier BASE_PATH. El login lo gestiona Authelia: si la sesión caduca,
 // nginx responde con una redirección y la app recarga la página para que el navegador la siga.
-import { centsToInput, formatMoney, parseAmount } from './shared/money.js';
+import { allocate, centsToInput, formatMoney, parseAmount } from './shared/money.js';
 import { computeShares, SplitError } from './shared/splits.js';
 
 const appEl = document.getElementById('app');
@@ -317,7 +317,7 @@ function timeline(bundle, people) {
       },
       el('span', { class: 'row-main' },
         el('strong', { text: expense.description }),
-        el('span', { class: 'muted small', text: `${expense.payerId === meId ? 'Pagaste' : `Pagó ${personName(people, expense.payerId)}`} · ${expense.shares.length === bundle.members.length ? 'entre todos' : `entre ${expense.shares.length}`}` })),
+        el('span', { class: 'muted small', text: `${expense.payerId === meId ? 'Pagaste' : `Pagó ${personName(people, expense.payerId)}`} · ${splitSummary(expense, bundle.members.length)}` })),
       el('span', { class: 'row-side' },
         el('strong', { text: formatMoney(expense.amountCents) }),
         el('span', { class: `small ${impact.tone}`, text: impact.text }))));
@@ -409,6 +409,66 @@ async function groupView(groupId, tab) {
     !bundle.group.archived && el('a', { class: 'fab round', href: `${base}/gasto`, 'aria-label': 'Añadir gasto', text: '+' }));
 }
 
+const SPLIT_MODES_UI = [
+  ['equal', 'Iguales'],
+  ['exact', 'Importes'],
+  ['shares', 'Partes'],
+];
+
+function segmented(options, current, onPick, label) {
+  const node = el('div', { class: 'segmented', role: 'radiogroup', 'aria-label': label });
+  for (const [value, text] of options) {
+    const button = el('button', {
+      type: 'button',
+      role: 'radio',
+      'aria-checked': String(value === current),
+      text,
+      onClick: () => {
+        node.querySelectorAll('button').forEach((other) => other.setAttribute('aria-checked', String(other === button)));
+        onPick(value);
+      },
+    });
+    node.append(button);
+  }
+  return node;
+}
+
+// Número de partes: se puede escribir (60/40) o ajustar con − y + (2/1/1).
+function stepper(value, onChange, label) {
+  let current = value;
+  const input = el('input', {
+    type: 'text',
+    inputMode: 'numeric',
+    class: 'stepper-value',
+    value: String(value),
+    'aria-label': `Partes de ${label}`,
+    onInput: () => {
+      const digits = input.value.replace(/\D/g, '').slice(0, 4);
+      current = Math.min(1000, Number(digits || 0));
+      if (input.value !== digits) input.value = digits;
+      onChange(current);
+    },
+    onBlur: () => { input.value = String(current); },
+  });
+  const set = (next) => {
+    current = Math.max(0, Math.min(1000, next));
+    input.value = String(current);
+    onChange(current);
+  };
+  return el('div', { class: 'stepper' },
+    el('button', { type: 'button', 'aria-label': `Menos partes para ${label}`, text: '−', onClick: () => set(current - 1) }),
+    input,
+    el('button', { type: 'button', 'aria-label': `Más partes para ${label}`, text: '+', onClick: () => set(current + 1) }));
+}
+
+function splitSummary(expense, memberCount) {
+  if (expense.splitMode === 'exact') return 'importes a medida';
+  if (expense.splitMode === 'shares') {
+    return expense.shares.length <= 4 ? `por partes ${expense.shares.map((share) => share.inputValue).join('/')}` : 'por partes';
+  }
+  return expense.shares.length === memberCount ? 'entre todos' : `entre ${expense.shares.length}`;
+}
+
 async function expenseFormView(groupId, expenseId) {
   const bundle = await api(`groups/${groupId}`);
   const editing = expenseId ? bundle.expenses.find((expense) => expense.id === expenseId) : null;
@@ -417,60 +477,174 @@ async function expenseFormView(groupId, expenseId) {
 
   const id = editing?.id ?? crypto.randomUUID();
   const members = bundle.members;
+  const people = new Map(members.map((member) => [member.id, member]));
   const meId = session.person.id;
-  let payerId = editing?.payerId ?? (members.some((m) => m.id === meId) ? meId : members[0]?.id);
-  const participants = new Set(editing ? editing.shares.map((share) => share.personId) : members.map((m) => m.id));
+  const memberLabel = (member) => (member.id === meId ? `${member.name} (tú)` : member.name);
+  let payerId = editing?.payerId ?? (people.has(meId) ? meId : members[0]?.id);
+
+  // Cada modo guarda su propio estado: cambiar de modo y volver no pierde lo escrito.
+  const defaultSplit = new Map((bundle.group.defaultSplit || []).map((entry) => [entry.personId, entry.weight]));
+  const editedShare = (personId) => editing?.shares.find((share) => share.personId === personId);
+  let mode = editing?.splitMode ?? (bundle.group.defaultSplit ? 'shares' : 'equal');
+  const participants = new Set(editing ? editing.shares.map((share) => share.personId) : members.map((member) => member.id));
+  const exactInputs = new Map(members.map((member) => [member.id,
+    editing?.splitMode === 'exact' && editedShare(member.id) ? centsToInput(editedShare(member.id).inputValue) : '']));
+  const weights = new Map(members.map((member) => {
+    if (editing?.splitMode === 'shares') return [member.id, editedShare(member.id)?.inputValue ?? 0];
+    if (bundle.group.defaultSplit) return [member.id, defaultSplit.get(member.id) ?? 0];
+    return [member.id, participants.has(member.id) ? 1 : 0];
+  }));
 
   const description = el('input', { type: 'text', maxLength: 120, placeholder: 'Cena, gasolina, súper…', autocomplete: 'off', value: editing?.description ?? '' });
   const amount = el('input', { type: 'text', inputMode: 'decimal', placeholder: '0,00', autocomplete: 'off', class: 'amount-input', value: editing ? centsToInput(editing.amountCents) : '' });
   const date = el('input', { type: 'date', value: editing?.spentOn ?? todayIso(), max: '2100-12-31' });
+  const splitBody = el('div', { class: 'stack' });
   const preview = el('div', { class: 'card list preview' });
   const status = el('p', { class: 'form-status', role: 'status' });
+  const exactStatus = el('p', { class: 'exact-status', role: 'status' });
 
-  const updatePreview = () => {
+  // Devuelve { entries } listo para la API, o { error } con un mensaje para la persona.
+  function currentEntries() {
+    if (mode === 'equal') {
+      if (!participants.size) return { error: 'Elige al menos una persona.' };
+      return { entries: [...participants].map((personId) => ({ personId })) };
+    }
+    if (mode === 'shares') {
+      const entries = members.map((member) => ({ personId: member.id, value: weights.get(member.id) })).filter((entry) => entry.value > 0);
+      return entries.length ? { entries } : { error: 'Pon al menos una parte a alguien.' };
+    }
+    const entries = [];
+    for (const member of members) {
+      const text = exactInputs.get(member.id).trim();
+      if (!text) continue;
+      const cents = parseAmount(text);
+      if (cents === null) return { error: `Importe no válido para ${member.name}.` };
+      if (cents > 0) entries.push({ personId: member.id, value: cents });
+    }
+    return entries.length ? { entries } : { error: 'Escribe el importe de al menos una persona.' };
+  }
+
+  function updatePreview() {
     preview.replaceChildren();
-    const cents = parseAmount(amount.value);
     status.textContent = '';
-    if (!participants.size) {
-      status.textContent = 'Elige al menos una persona.';
+    exactStatus.textContent = '';
+    exactStatus.className = 'exact-status';
+    const total = parseAmount(amount.value);
+    const { entries, error } = currentEntries();
+
+    if (mode === 'exact') {
+      const assigned = (entries || []).reduce((sum, entry) => sum + entry.value, 0);
+      if (total) {
+        const diff = total - assigned;
+        exactStatus.textContent = diff === 0
+          ? `Asignado ${formatMoney(assigned)} de ${formatMoney(total)} ✓`
+          : `Asignado ${formatMoney(assigned)} de ${formatMoney(total)} · ${diff > 0 ? 'faltan' : 'sobran'} ${formatMoney(Math.abs(diff))}`;
+        exactStatus.classList.add(diff === 0 ? 'ok' : 'pending');
+      }
+      if (error && assigned > 0) status.textContent = error;
       return;
     }
-    if (!cents) return;
+    if (error) {
+      status.textContent = error;
+      return;
+    }
+    if (!total) return;
     try {
-      const shares = computeShares({ totalCents: cents, mode: 'equal', entries: [...participants].map((personId) => ({ personId })), seed: id });
-      for (const share of shares) {
+      for (const share of computeShares({ totalCents: total, mode, entries, seed: id })) {
         preview.append(el('div', { class: 'row static' },
-          el('span', { class: 'row-main', text: personName(new Map(members.map((m) => [m.id, m])), share.personId) }),
+          el('span', { class: 'row-main', text: personName(people, share.personId) }),
           el('span', { class: 'amount', text: formatMoney(share.owedCents) })));
       }
-    } catch (error) {
-      if (error instanceof SplitError) status.textContent = error.message;
-      else throw error;
+    } catch (splitError) {
+      if (splitError instanceof SplitError) status.textContent = splitError.message;
+      else throw splitError;
     }
-  };
-  amount.addEventListener('input', updatePreview);
+  }
 
-  const participantChips = el('div', { class: 'chips' },
-    members.map((member) => chip({
-      label: member.id === meId ? `${member.name} (tú)` : member.name,
-      selected: participants.has(member.id),
-      onToggle: (on) => {
-        if (on) participants.add(member.id);
-        else participants.delete(member.id);
-        updatePreview();
-      },
-    })));
-  const toggleAll = el('button', {
-    type: 'button',
-    class: 'link-btn',
-    text: 'Todos / ninguno',
-    onClick: () => {
-      const selectAll = participants.size !== members.length;
-      participantChips.querySelectorAll('.chip').forEach((node) => {
-        if ((node.getAttribute('aria-checked') === 'true') !== selectAll) node.click();
-      });
-    },
-  });
+  // "Repartir lo que falta": la propina o lo compartido, a partes iguales entre quienes ya
+  // tienen importe (o entre todos si nadie lo tiene todavía).
+  function fillRemaining() {
+    const total = parseAmount(amount.value);
+    if (!total) return toast('Escribe primero el importe total.');
+    const { entries, error } = currentEntries();
+    if (error && (entries || []).length) return toast(error);
+    const assigned = (entries || []).reduce((sum, entry) => sum + entry.value, 0);
+    const remaining = total - assigned;
+    if (remaining <= 0) return toast(remaining === 0 ? 'Ya está todo repartido.' : 'Los importes ya superan el total.');
+    const targets = entries?.length ? entries.map((entry) => entry.personId) : members.map((member) => member.id);
+    const extra = allocate(remaining, targets.map(() => 1), id);
+    targets.forEach((personId, index) => {
+      const current = parseAmount(exactInputs.get(personId)) || 0;
+      exactInputs.set(personId, centsToInput(current + extra[index]));
+    });
+    renderSplitBody();
+  }
+
+  function renderSplitBody() {
+    splitBody.replaceChildren();
+    if (mode === 'equal') {
+      const chips = el('div', { class: 'chips' },
+        members.map((member) => chip({
+          label: memberLabel(member),
+          selected: participants.has(member.id),
+          onToggle: (on) => {
+            if (on) participants.add(member.id);
+            else participants.delete(member.id);
+            updatePreview();
+          },
+        })));
+      splitBody.append(
+        el('div', { class: 'field-row' },
+          el('span', { class: 'field-hint', text: 'Toca para quitar a quien no participa.' }),
+          el('button', {
+            type: 'button',
+            class: 'link-btn',
+            text: 'Todos / ninguno',
+            onClick: () => {
+              const selectAll = participants.size !== members.length;
+              chips.querySelectorAll('.chip').forEach((node) => {
+                if ((node.getAttribute('aria-checked') === 'true') !== selectAll) node.click();
+              });
+            },
+          })),
+        chips);
+    } else if (mode === 'exact') {
+      splitBody.append(
+        el('span', { class: 'field-hint', text: 'Lo que le toca a cada uno. Vacío = no participa.' }),
+        el('div', { class: 'card list' },
+          members.map((member) => {
+            const input = el('input', {
+              type: 'text',
+              inputMode: 'decimal',
+              placeholder: '0,00',
+              autocomplete: 'off',
+              class: 'share-input',
+              value: exactInputs.get(member.id),
+              'aria-label': `Importe de ${member.name}`,
+              onInput: () => {
+                exactInputs.set(member.id, input.value);
+                updatePreview();
+              },
+            });
+            return el('label', { class: 'row static' }, el('span', { class: 'row-main', text: memberLabel(member) }), input);
+          })),
+        exactStatus,
+        el('button', { type: 'button', class: 'btn secondary block', text: 'Repartir lo que falta a partes iguales', onClick: fillRemaining }));
+    } else {
+      splitBody.append(
+        el('span', { class: 'field-hint', text: 'Por ejemplo 60 y 40, o 2 y 1 si alguien cuenta doble. 0 = no participa.' }),
+        el('div', { class: 'card list' },
+          members.map((member) => el('div', { class: 'row static' },
+            el('span', { class: 'row-main', text: memberLabel(member) }),
+            stepper(weights.get(member.id), (value) => {
+              weights.set(member.id, value);
+              updatePreview();
+            }, member.name)))));
+    }
+    updatePreview();
+  }
+
+  amount.addEventListener('input', updatePreview);
 
   const submit = el('button', { class: 'btn primary', type: 'submit', text: editing ? 'Guardar cambios' : 'Añadir gasto' });
   const form = el('form', {
@@ -481,30 +655,27 @@ async function expenseFormView(groupId, expenseId) {
       const cents = parseAmount(amount.value);
       if (!description.value.trim()) return (description.focus(), toast('Falta la descripción.'));
       if (!cents) return (amount.focus(), toast('Importe no válido.'));
-      if (!participants.size) return toast('Elige al menos una persona.');
-      const body = {
-        id,
-        description: description.value,
-        amountCents: cents,
-        payerId,
-        spentOn: date.value,
-        splitMode: 'equal',
-        shares: [...participants].map((personId) => ({ personId })),
-      };
+      const { entries, error } = currentEntries();
+      if (error) return toast(error);
+      if (mode === 'exact') {
+        const assigned = entries.reduce((sum, entry) => sum + entry.value, 0);
+        if (assigned !== cents) return toast(`Los importes suman ${formatMoney(assigned)} y el gasto es de ${formatMoney(cents)}.`);
+      }
+      const body = { id, description: description.value, amountCents: cents, payerId, spentOn: date.value, splitMode: mode, shares: entries };
       submit.disabled = true;
       try {
         if (editing) await api(`expenses/${id}`, { method: 'PUT', body: { ...body, version: editing.version } });
         else await api(`groups/${groupId}/expenses`, { method: 'POST', body });
         navigate(`#/g/${groupId}`, { replace: true });
         toast(editing ? 'Gasto actualizado' : 'Gasto añadido');
-      } catch (error) {
+      } catch (requestError) {
         submit.disabled = false;
-        if (error.status === 409 && error.data?.expense) {
+        if (requestError.status === 409 && requestError.data?.expense) {
           toast('Otro dispositivo cambió este gasto. Se ha recargado.');
           render();
           return;
         }
-        handleError(error);
+        handleError(requestError);
       }
     },
   },
@@ -514,15 +685,19 @@ async function expenseFormView(groupId, expenseId) {
     el('span', { class: 'field-label', text: 'Pagó' }),
     el('div', { class: 'chips', role: 'radiogroup' },
       members.map((member) => chip({
-        label: member.id === meId ? `${member.name} (tú)` : member.name,
+        label: memberLabel(member),
         selected: member.id === payerId,
         role: 'radio',
         onToggle: () => { payerId = member.id; },
       })))),
   field('Fecha', date),
   el('div', { class: 'field' },
-    el('span', { class: 'field-row' }, el('span', { class: 'field-label', text: 'Para quién (a partes iguales)' }), toggleAll),
-    participantChips),
+    el('span', { class: 'field-label', text: 'Cómo se reparte' }),
+    segmented(SPLIT_MODES_UI, mode, (value) => {
+      mode = value;
+      renderSplitBody();
+    }, 'Cómo se reparte'),
+    splitBody),
   preview,
   status,
   submit,
@@ -549,7 +724,7 @@ async function expenseFormView(groupId, expenseId) {
   }));
 
   mount(topbar({ title: editing ? 'Editar gasto' : 'Nuevo gasto', back: `#/g/${groupId}` }), form);
-  updatePreview();
+  renderSplitBody();
   if (!editing) description.focus();
 }
 
@@ -602,6 +777,47 @@ async function settlementFormView(groupId, query) {
   submit);
 
   mount(topbar({ title: 'Registrar pago', back: `#/g/${groupId}/saldos` }), form);
+}
+
+// Reparto con el que empieza cada gasto nuevo del grupo (p. ej. 60/40 en Pareja).
+function defaultSplitCard(bundle, patch) {
+  const current = new Map((bundle.group.defaultSplit || []).map((entry) => [entry.personId, entry.weight]));
+  let custom = Boolean(bundle.group.defaultSplit);
+  const weights = new Map(bundle.members.map((member) => [member.id, custom ? current.get(member.id) ?? 0 : 1]));
+  const body = el('div', { class: 'stack' });
+
+  const renderBody = () => {
+    body.replaceChildren();
+    if (!custom) {
+      body.append(el('p', { class: 'muted small', text: 'Cada gasto nuevo empieza repartido a partes iguales entre todos.' }));
+      return;
+    }
+    body.append(
+      el('div', { class: 'list' },
+        bundle.members.map((member) => el('div', { class: 'row static' },
+          el('span', { class: 'row-main', text: member.id === session.person.id ? `${member.name} (tú)` : member.name }),
+          stepper(weights.get(member.id), (value) => weights.set(member.id, value), member.name)))));
+  };
+
+  const save = () => {
+    if (!custom) return patch({ defaultSplit: null }, 'Reparto por defecto: a partes iguales');
+    const entries = [...weights].map(([personId, weight]) => ({ personId, weight }));
+    if (!entries.some((entry) => entry.weight > 0)) return toast('Al menos una persona tiene que tener partes.');
+    const summary = entries.map((entry) => entry.weight).join('/');
+    return patch({ defaultSplit: entries }, `Reparto por defecto: ${summary}`);
+  };
+
+  renderBody();
+  return el('div', { class: 'card stack' },
+    el('span', {},
+      el('strong', { text: 'Reparto por defecto' }),
+      el('span', { class: 'muted small block', text: 'Se puede cambiar en cada gasto.' })),
+    segmented([['equal', 'Iguales'], ['shares', 'Por partes']], custom ? 'shares' : 'equal', (value) => {
+      custom = value === 'shares';
+      renderBody();
+    }, 'Reparto por defecto'),
+    body,
+    el('button', { type: 'button', class: 'btn secondary block', text: 'Guardar reparto', onClick: save }));
 }
 
 async function settingsView(groupId) {
@@ -657,6 +873,8 @@ async function settingsView(groupId) {
           el('strong', { text: 'Simplificar deudas' }),
           el('span', { class: 'muted small block', text: 'Propone el mínimo de pagos entre todos, aunque alguien acabe pagando a quien no le prestó directamente.' })),
         simplify),
+
+      writable && bundle.members.length > 1 && defaultSplitCard(bundle, patch),
 
       el('h2', { class: 'section-title', text: `Personas (${bundle.members.length})` }),
       el('div', { class: 'card list' },

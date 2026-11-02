@@ -10,7 +10,7 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 |---|---|---|
 | F0 | Esqueleto, login con Authelia, migraciones, tests, pm2/nginx de ejemplo | ✅ |
 | F1 | Personas, grupos, gastos a partes iguales (entre todos o algunos), saldos, pagos sugeridos, liquidaciones | ✅ |
-| F2 | Repartos por subconjunto, importes exactos y partes | Pendiente |
+| F2 | Importes exactos (con "repartir lo que falta"), partes y reparto por defecto del grupo | ✅ |
 | F3 | Divisas | Pendiente |
 | F4 | PWA, offline de lectura, enlace para amigos | Pendiente |
 | F5 | Despliegue y backups | Pendiente |

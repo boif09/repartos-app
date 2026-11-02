@@ -231,3 +231,56 @@ test('validaciones de gastos', async (t) => {
   result = await call('POST', '/groups', { title: 'x'.repeat(61) });
   assert.equal(result.status, 400);
 });
+
+test('reparto por defecto del grupo (60/40) y gasto por partes', async (t) => {
+  const call = await startApp(t);
+  const { person: xavi } = await call('GET', '/session');
+  const { person: judit } = await call('GET', '/session', undefined, 'judit');
+  const { group } = await call('POST', '/groups', { title: 'Pareja', members: [{ personId: judit.id }] });
+  assert.equal(group.defaultSplit, null);
+
+  let bundle = await call('PATCH', `/groups/${group.id}`, {
+    defaultSplit: [{ personId: xavi.id, weight: 60 }, { personId: judit.id, weight: 40 }],
+  });
+  assert.deepEqual(bundle.group.defaultSplit, [{ personId: xavi.id, weight: 60 }, { personId: judit.id, weight: 40 }]);
+
+  const { expense } = await call('POST', `/groups/${group.id}/expenses`, {
+    id: crypto.randomUUID(), description: 'Compra', spentOn: today, payerId: judit.id, amountCents: 10001,
+    splitMode: 'shares', shares: [{ personId: xavi.id, value: 60 }, { personId: judit.id, value: 40 }],
+  });
+  assert.equal(expense.splitMode, 'shares');
+  assert.deepEqual(expense.shares.map((s) => [s.personId, s.inputValue]), [[xavi.id, 60], [judit.id, 40]]);
+  assert.equal(expense.shares.reduce((sum, s) => sum + s.owedCents, 0), 10001);
+  bundle = await call('GET', `/groups/${group.id}`);
+  assert.equal(balanceOf(bundle, xavi.id), -expense.shares.find((s) => s.personId === xavi.id).owedCents);
+
+  const invalid = [
+    [{ defaultSplit: [{ personId: 9999, weight: 1 }] }, /personas del grupo/],
+    [{ defaultSplit: [{ personId: xavi.id, weight: 0 }] }, /Al menos una persona/],
+    [{ defaultSplit: [{ personId: xavi.id, weight: 1001 }] }, /entre 0 y 1000/],
+    [{ defaultSplit: [{ personId: xavi.id, weight: 1 }, { personId: xavi.id, weight: 2 }] }, /repetida/],
+    [{ defaultSplit: 'mitad' }, /no válido/],
+  ];
+  for (const [body, message] of invalid) {
+    const result = await call('PATCH', `/groups/${group.id}`, body);
+    assert.equal(result.status, 400, JSON.stringify(body));
+    assert.match(result.error, message);
+  }
+
+  bundle = await call('PATCH', `/groups/${group.id}`, { defaultSplit: null });
+  assert.equal(bundle.group.defaultSplit, null);
+});
+
+test('el reparto por defecto ignora a quien ya no está en el grupo', async (t) => {
+  const call = await startApp(t);
+  const { person: xavi } = await call('GET', '/session');
+  const { group, members } = await call('POST', '/groups', { title: 'Piso', members: [{ name: 'Ana' }] });
+  const ana = members.find((m) => m.name === 'Ana');
+  await call('PATCH', `/groups/${group.id}`, { defaultSplit: [{ personId: xavi.id, weight: 2 }, { personId: ana.id, weight: 1 }] });
+  let bundle = await call('DELETE', `/groups/${group.id}/members/${ana.id}`);
+  assert.deepEqual(bundle.group.defaultSplit, [{ personId: xavi.id, weight: 2 }]);
+
+  await call('PATCH', `/groups/${group.id}`, { defaultSplit: [{ personId: xavi.id, weight: 2 }] });
+  bundle = await call('GET', `/groups/${group.id}`);
+  assert.deepEqual(bundle.group.defaultSplit, [{ personId: xavi.id, weight: 2 }]);
+});

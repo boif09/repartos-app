@@ -68,8 +68,20 @@ const toGroup = (row) => ({
   emoji: row.emoji ?? null,
   baseCurrency: row.base_currency,
   simplifyDebts: row.simplify_debts === 1,
+  defaultSplit: parseDefaultSplit(row.default_split),
   archived: row.archived_at !== null,
 });
+
+// Reparto por defecto del grupo (p. ej. 60/40 en Pareja): [{ personId, weight }] o null = a partes iguales.
+function parseDefaultSplit(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 const toSettlement = (row) => ({
   id: row.id,
@@ -225,9 +237,16 @@ export function createRepository(db) {
     const row = getGroupRow(groupId);
     const group = toGroup(row);
     const { expenses, settlements, balances, transfers } = computeGroupMoney(row.id, group.simplifyDebts);
+    const members = listMembers(row.id);
+    // Si alguien salió del grupo, su entrada del reparto por defecto deja de contar.
+    if (group.defaultSplit) {
+      const current = new Set(members.map((member) => member.id));
+      const entries = group.defaultSplit.filter((entry) => current.has(entry.personId));
+      group.defaultSplit = entries.some((entry) => entry.weight > 0) ? entries : null;
+    }
     return {
       group,
-      members: listMembers(row.id),
+      members,
       expenses,
       settlements,
       balances: [...balances].map(([personId, amountCents]) => ({ personId, amountCents })),
@@ -276,6 +295,9 @@ export function createRepository(db) {
       if (body?.simplifyDebts !== undefined) {
         db.prepare('UPDATE expense_groups SET simplify_debts = ? WHERE id = ?').run(body.simplifyDebts ? 1 : 0, row.id);
       }
+      if (body?.defaultSplit !== undefined) {
+        db.prepare('UPDATE expense_groups SET default_split = ? WHERE id = ?').run(validateDefaultSplit(body.defaultSplit, row.id), row.id);
+      }
       if (body?.archived !== undefined) {
         if (body.archived) {
           const { balances } = computeGroupMoney(row.id, false);
@@ -289,6 +311,25 @@ export function createRepository(db) {
       }
       return getGroupBundle(row.id, meId);
     });
+  }
+
+  // null o [] = a partes iguales. Pesos enteros 0..1000; 0 = no participa por defecto.
+  function validateDefaultSplit(value, groupId) {
+    if (value === null || (Array.isArray(value) && value.length === 0)) return null;
+    if (!Array.isArray(value)) throw badRequest('Reparto por defecto no válido.');
+    const members = new Set(memberIds(groupId));
+    const seen = new Set();
+    const entries = value.map((entry) => {
+      const personId = positiveId(entry?.personId, 'Persona');
+      const weight = Number(entry?.weight);
+      if (!members.has(personId)) throw badRequest('El reparto por defecto solo puede incluir personas del grupo.');
+      if (seen.has(personId)) throw badRequest('Hay una persona repetida en el reparto por defecto.');
+      if (!Number.isSafeInteger(weight) || weight < 0 || weight > 1000) throw badRequest('Las partes deben ser números enteros entre 0 y 1000.');
+      seen.add(personId);
+      return { personId, weight };
+    });
+    if (!entries.some((entry) => entry.weight > 0)) throw badRequest('Al menos una persona tiene que tener partes.');
+    return JSON.stringify(entries);
   }
 
   function addMember(groupId, body, meId) {
