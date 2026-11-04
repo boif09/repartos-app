@@ -76,6 +76,15 @@ test('sin simplificar, las deudas por pares incluyen los pendientes', () => {
   assert.deepEqual(merged.transfers, [{ fromId: JUDIT, toId: XAVI, amountCents: 300 }]);
 });
 
+test('pendientes con varios pagadores', () => {
+  const item = pendingExpense('pm', XAVI, 1000);
+  item.expense.payers = [{ personId: XAVI, paidCents: 300 }, { personId: JUDIT, paidCents: 700 }];
+  const merged = mergePending(bundle(), [item], XAVI);
+  // Xavi: +500 (servidor) +300 pagó −500 su parte = 300
+  assert.equal(merged.myBalanceCents, 300);
+  assert.equal(pendingDelta([item], 7, XAVI), 300 - 500);
+});
+
 test('pendingDelta: cambio de mi saldo en la lista de grupos', () => {
   const items = [
     pendingExpense('p1', XAVI, 1000),

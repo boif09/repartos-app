@@ -318,6 +318,37 @@ Igual que TripFlow:
 | **F3 Divisas** | Moneda por gasto, Frankfurter con caché, tipo manual, "me cobraron" | Viaje en JPY con saldos en EUR correctos |
 | **F4 Móvil y compartir** | PWA instalable, caché offline de lectura, enlace de amigos, detalle de persona | Instalada en ambos móviles y enlace enviado a un amigo |
 | **F5 Despliegue** | DNS, certificado, regla de Authelia, `deploy-repartos.sh`, backups, publicación en `repartos.jusboif.es` | En producción con backup diario verificado |
-| *Después* | Importar CSV de Splitwise, cola offline, categorías, varios pagadores | — |
+| **F6 Sin conexión** | Apariencia clara/oscura, cola de gastos y pagos sin conexión | Gasto apuntado en modo avión y sincronizado al volver |
+| **F7 Colaboración** | Varios pagadores, autoría, actividad, avisos push, resumen, categorías, búsqueda | Ver ampliaciones (§11) |
+| *Descartado* | Importar CSV de Splitwise | — |
 
 Antes de cancelar Splitwise: exportar el CSV de cada grupo (Splitwise lo permite por grupo) para tener el histórico. El importador puede venir en una fase posterior, y como mínimo basta un gasto de "saldo inicial" por grupo.
+
+---
+
+## 11. Ampliaciones (F7)
+
+### 11.1 Varios pagadores
+
+- Tabla `expense_payers(expense_id, person_id, input_value, paid_cents)`. La migración 3 la rellena con el pagador único de cada gasto; `expenses.payer_id` se mantiene como pagador principal (el que más pagó) por compatibilidad.
+- `computePayers` (`shared/splits.js`) valida que lo pagado sume el total, sin repetir personas. En otra moneda se reparte el total convertido con el mismo resto mayor que las partes (semilla `id:pagadores`).
+- Saldos: cada pagador suma lo que pagó. Deudas por pareja: la parte de cada persona se reparte entre los pagadores en proporción a lo pagado.
+- Los gastos antiguos y los de la cola offline sin `payers` se tratan como de un solo pagador (`payersOf`).
+
+### 11.2 Autoría y actividad
+
+- `expenses.created_by`, `expenses.updated_by` y `settlements.created_by` guardan la persona de Authelia que hizo el cambio.
+- Tabla `activity`: cada cambio (gastos, pagos, miembros, grupo) se apunta dentro de la misma transacción. Solo se ve la actividad de los grupos de los que eres miembro.
+- `activity_seen` guarda el último evento visto por persona; las novedades excluyen lo que hizo uno mismo. La campana de inicio muestra un punto si hay novedades.
+
+### 11.3 Avisos push
+
+- Sin dependencias: cifrado `aes128gcm` (RFC 8291, verificado con el vector del RFC) y VAPID ES256 (RFC 8292). La clave VAPID se genera la primera vez y se guarda en `app_settings`.
+- Los avisos se envían después del COMMIT y nunca bloquean la respuesta. Se avisa a los demás miembros con usuario de gastos nuevos, editados o borrados y de pagos. Un 404/410 del servicio borra la suscripción.
+- En iPhone solo funcionan con la app instalada en la pantalla de inicio (iOS 16.4+).
+
+### 11.4 Resumen, categorías y búsqueda
+
+- Pestaña "Resumen" en cada grupo: total gastado, número de gastos, fechas, media diaria, lo que pagó cada uno frente a su parte y gasto por categoría.
+- `shared/categories.js`: categorías fijas y sugerencia automática por palabras de la descripción, que el usuario puede cambiar.
+- Búsqueda en la lista de gastos (a partir de 4 gastos), sin tildes ni mayúsculas.

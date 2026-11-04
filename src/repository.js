@@ -2,7 +2,9 @@ import crypto from 'node:crypto';
 import { badRequest, conflict, notFound } from './errors.js';
 import { MAX_CENTS, currencyExponent, isCurrencyCode } from '../shared/money.js';
 import { convertMinor, parseRate } from '../shared/fx.js';
-import { computeShares, SplitError, SPLIT_MODES } from '../shared/splits.js';
+import { isPushEndpoint } from './push.js';
+import { computePayers, computeShares, mainPayer, SplitError, SPLIT_MODES } from '../shared/splits.js';
+import { CATEGORY_KEYS } from '../shared/categories.js';
 import { computeBalances, pairwiseDebts } from '../shared/balances.js';
 import { settle } from '../shared/settle.js';
 
@@ -101,20 +103,167 @@ const toSettlement = (row) => ({
   toId: row.to_id,
   amountCents: row.amount_cents,
   paidOn: row.paid_on,
+  createdBy: row.created_by ?? null,
   createdAt: row.created_at,
 });
 
-export function createRepository(db) {
+const ACTIVITY_PAGE = 30;
+
+// onActivity(evento) se llama DESPUÉS de confirmar cada cambio (p. ej. para enviar avisos push).
+export function createRepository(db, { onActivity = () => {} } = {}) {
+  let pendingEvents = [];
+
   function transaction(fn) {
     db.exec('BEGIN IMMEDIATE;');
     try {
       const result = fn();
       db.exec('COMMIT;');
+      const events = pendingEvents;
+      pendingEvents = [];
+      for (const event of events) {
+        try {
+          onActivity(event);
+        } catch (error) {
+          console.error('Error al notificar actividad:', error);
+        }
+      }
       return result;
     } catch (error) {
       db.exec('ROLLBACK;');
+      pendingEvents = [];
       throw error;
     }
+  }
+
+  // ---------- Actividad ----------
+
+  function personName(id) {
+    return id ? db.prepare('SELECT name FROM people WHERE id = ?').get(id)?.name ?? null : null;
+  }
+
+  // Siempre dentro de una transacción: si el cambio se deshace, la actividad también.
+  function logActivity(groupId, actorId, kind, subjectId, data) {
+    const result = db.prepare('INSERT INTO activity (group_id, actor_id, kind, subject_id, data) VALUES (?, ?, ?, ?, ?)')
+      .run(groupId, actorId ?? null, kind, subjectId ?? null, JSON.stringify(data ?? {}));
+    pendingEvents.push({ id: Number(result.lastInsertRowid), groupId, actorId: actorId ?? null, kind, subjectId: subjectId ?? null, data: data ?? {} });
+  }
+
+  function toActivity(row) {
+    let data = {};
+    try {
+      data = JSON.parse(row.data);
+    } catch { /* datos dañados: se muestra sin detalle */ }
+    return {
+      id: row.id,
+      groupId: row.group_id,
+      groupTitle: row.group_title,
+      groupEmoji: row.group_emoji ?? null,
+      groupCurrency: row.group_currency,
+      actorId: row.actor_id ?? null,
+      actorName: row.actor_name ?? null,
+      kind: row.kind,
+      subjectId: row.subject_id ?? null,
+      data,
+      createdAt: row.created_at,
+    };
+  }
+
+  // Lo último que ha pasado en los grupos de meId, de más reciente a más antiguo.
+  function listActivity(meId, { before, limit } = {}) {
+    const max = Math.min(Math.max(Number(limit) || ACTIVITY_PAGE, 1), 100);
+    const cursor = Number(before) > 0 ? Number(before) : Number.MAX_SAFE_INTEGER;
+    const rows = db.prepare(`
+      SELECT a.*, g.title AS group_title, g.emoji AS group_emoji, g.base_currency AS group_currency, p.name AS actor_name
+      FROM activity a
+      JOIN group_members gm ON gm.group_id = a.group_id AND gm.person_id = ?
+      JOIN expense_groups g ON g.id = a.group_id
+      LEFT JOIN people p ON p.id = a.actor_id
+      WHERE a.id < ?
+      ORDER BY a.id DESC
+      LIMIT ?
+    `).all(meId, cursor, max + 1);
+    const items = rows.slice(0, max).map(toActivity);
+    return {
+      items,
+      nextBefore: rows.length > max ? items.at(-1).id : null,
+      lastSeenId: lastSeenId(meId),
+      unread: unreadCount(meId),
+    };
+  }
+
+  function lastSeenId(meId) {
+    return db.prepare('SELECT last_seen_id FROM activity_seen WHERE person_id = ?').get(meId)?.last_seen_id ?? 0;
+  }
+
+  // Novedades: lo que han hecho otras personas en mis grupos desde la última vez que miré.
+  function unreadCount(meId) {
+    return Number(db.prepare(`
+      SELECT COUNT(*) AS n FROM activity a
+      JOIN group_members gm ON gm.group_id = a.group_id AND gm.person_id = ?
+      WHERE a.id > ? AND (a.actor_id IS NULL OR a.actor_id <> ?)
+    `).get(meId, lastSeenId(meId), meId).n);
+  }
+
+  function markActivitySeen(meId, lastId) {
+    const id = Number(lastId);
+    if (!Number.isSafeInteger(id) || id < 0) throw badRequest('Identificador no válido.');
+    db.prepare(`
+      INSERT INTO activity_seen (person_id, last_seen_id) VALUES (?, ?)
+      ON CONFLICT(person_id) DO UPDATE SET last_seen_id = MAX(last_seen_id, excluded.last_seen_id)
+    `).run(meId, id);
+    return { lastSeenId: lastSeenId(meId), unread: unreadCount(meId) };
+  }
+
+  // ---------- Avisos push y ajustes ----------
+
+  function getSetting(key) {
+    return db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value ?? null;
+  }
+
+  function setSetting(key, value) {
+    db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
+
+  function savePushSubscription(meId, subscription) {
+    const endpoint = String(subscription?.endpoint ?? '');
+    const p256dh = String(subscription?.keys?.p256dh ?? '');
+    const auth = String(subscription?.keys?.auth ?? '');
+    let url;
+    try {
+      url = new URL(endpoint);
+    } catch {
+      throw badRequest('Suscripción no válida.');
+    }
+    if (url.protocol !== 'https:' || endpoint.length > 1000 || !isPushEndpoint(endpoint)) throw badRequest('Suscripción no válida.');
+    if (!/^[A-Za-z0-9_-]{80,100}$/.test(p256dh) || !/^[A-Za-z0-9_-]{16,32}$/.test(auth)) throw badRequest('Suscripción no válida.');
+    db.prepare(`
+      INSERT INTO push_subscriptions (endpoint, person_id, p256dh, auth) VALUES (?, ?, ?, ?)
+      ON CONFLICT(endpoint) DO UPDATE SET person_id = excluded.person_id, p256dh = excluded.p256dh, auth = excluded.auth
+    `).run(endpoint, meId, p256dh, auth);
+    return { subscribed: true };
+  }
+
+  function deletePushSubscription(meId, endpoint) {
+    db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ? AND person_id = ?').run(String(endpoint ?? ''), meId);
+    return { subscribed: false };
+  }
+
+  function forgetPushEndpoint(endpoint) {
+    db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
+  }
+
+  // Suscripciones de los miembros del grupo, salvo quien hizo el cambio.
+  function pushTargets(groupId, actorId) {
+    return db.prepare(`
+      SELECT s.*, p.name AS person_name FROM push_subscriptions s
+      JOIN group_members gm ON gm.person_id = s.person_id AND gm.group_id = ?
+      JOIN people p ON p.id = s.person_id
+      WHERE s.person_id <> ?
+    `).all(groupId, actorId ?? 0);
+  }
+
+  function groupTitle(groupId) {
+    return db.prepare('SELECT title, base_currency FROM expense_groups WHERE id = ?').get(groupId) ?? null;
   }
 
   // ---------- Personas ----------
@@ -211,7 +360,16 @@ export function createRepository(db) {
       if (!byExpense.has(share.expense_id)) byExpense.set(share.expense_id, []);
       byExpense.get(share.expense_id).push({ personId: share.person_id, inputValue: share.input_value, owedCents: share.owed_cents });
     }
-    return expenses.map((row) => toExpense(row, byExpense.get(row.id) || []));
+    const payers = db.prepare(`
+      SELECT p.* FROM expense_payers p JOIN expenses e ON e.id = p.expense_id
+      WHERE e.group_id = ? AND e.deleted_at IS NULL ORDER BY p.paid_cents DESC, p.person_id
+    `).all(groupId);
+    const payersByExpense = new Map();
+    for (const payer of payers) {
+      if (!payersByExpense.has(payer.expense_id)) payersByExpense.set(payer.expense_id, []);
+      payersByExpense.get(payer.expense_id).push({ personId: payer.person_id, inputValue: payer.input_value, paidCents: payer.paid_cents });
+    }
+    return expenses.map((row) => toExpense(row, byExpense.get(row.id) || [], payersByExpense.get(row.id) || []));
   }
 
   function activeSettlements(groupId) {
@@ -224,7 +382,7 @@ export function createRepository(db) {
   function computeGroupMoney(groupId, simplifyDebts) {
     const expenses = activeExpenses(groupId);
     const settlements = activeSettlements(groupId);
-    const balanceExpenses = expenses.map((expense) => ({ payerId: expense.payerId, baseCents: expense.amountCents, shares: expense.shares }));
+    const balanceExpenses = expenses.map((expense) => ({ payerId: expense.payerId, baseCents: expense.amountCents, shares: expense.shares, payers: expense.payers }));
     const balances = computeBalances(memberIds(groupId), balanceExpenses, settlements);
     const transfers = simplifyDebts ? settle(balances) : pairwiseDebts(balanceExpenses, settlements);
     return { expenses, settlements, balances, transfers };
@@ -335,6 +493,7 @@ export function createRepository(db) {
       const groupId = Number(result.lastInsertRowid);
       addMemberRow(groupId, meId);
       for (const member of members) addMemberRow(groupId, resolveMemberInput(member));
+      logActivity(groupId, meId, 'group_created', null, { title });
       return getGroupBundle(groupId, meId);
     });
   }
@@ -347,8 +506,11 @@ export function createRepository(db) {
       throw conflict('El grupo está archivado. Desarchívalo para hacer cambios.');
     }
     return transaction(() => {
+      const changes = [];
       if (body?.title !== undefined) {
-        db.prepare('UPDATE expense_groups SET title = ? WHERE id = ?').run(text(body.title, 'el título', { max: 60 }), row.id);
+        const title = text(body.title, 'el título', { max: 60 });
+        if (title !== row.title) changes.push('title');
+        db.prepare('UPDATE expense_groups SET title = ? WHERE id = ?').run(title, row.id);
       }
       if (body?.emoji !== undefined) {
         db.prepare('UPDATE expense_groups SET emoji = ? WHERE id = ?').run(emoji(body.emoji), row.id);
@@ -365,10 +527,12 @@ export function createRepository(db) {
           `).get(row.id, row.id);
           if (used) throw conflict('La moneda del grupo solo se puede cambiar mientras no tenga gastos ni pagos.');
           db.prepare('UPDATE expense_groups SET base_currency = ? WHERE id = ?').run(baseCurrency, row.id);
+          changes.push('currency');
         }
       }
       if (body?.defaultSplit !== undefined) {
         db.prepare('UPDATE expense_groups SET default_split = ? WHERE id = ?').run(validateDefaultSplit(body.defaultSplit, row.id), row.id);
+        changes.push('defaultSplit');
       }
       if (body?.archived !== undefined) {
         if (body.archived) {
@@ -377,10 +541,15 @@ export function createRepository(db) {
             throw conflict('Solo se puede archivar un grupo con todas las cuentas saldadas.');
           }
           db.prepare('UPDATE expense_groups SET archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP) WHERE id = ?').run(row.id);
+          if (row.archived_at === null) logActivity(row.id, meId, 'group_archived', null, {});
         } else {
           db.prepare('UPDATE expense_groups SET archived_at = NULL WHERE id = ?').run(row.id);
+          if (row.archived_at !== null) logActivity(row.id, meId, 'group_unarchived', null, {});
         }
       }
+      if (changes.includes('title')) logActivity(row.id, meId, 'group_renamed', null, { from: row.title, title: text(body.title, 'el título', { max: 60 }) });
+      if (changes.includes('currency')) logActivity(row.id, meId, 'group_currency', null, { currency: currencyCode(body.baseCurrency) });
+      if (changes.includes('defaultSplit')) logActivity(row.id, meId, 'group_default_split', null, {});
       return getGroupBundle(row.id, meId);
     });
   }
@@ -407,7 +576,10 @@ export function createRepository(db) {
   function addMember(groupId, body, meId) {
     const row = getWritableGroupRow(groupId);
     return transaction(() => {
-      addMemberRow(row.id, resolveMemberInput(body));
+      const personId = resolveMemberInput(body);
+      const already = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND person_id = ?').get(row.id, personId);
+      addMemberRow(row.id, personId);
+      if (!already) logActivity(row.id, meId, 'member_added', String(personId), { personId, name: personName(personId) });
       return getGroupBundle(row.id, meId);
     });
   }
@@ -418,25 +590,33 @@ export function createRepository(db) {
     // Solo cuentan gastos y pagos activos; restaurar uno borrado vuelve a comprobar los miembros.
     const used = db.prepare(`
       SELECT 1 FROM expenses e WHERE e.group_id = ? AND e.deleted_at IS NULL AND (e.payer_id = ? OR EXISTS (
-        SELECT 1 FROM expense_shares s WHERE s.expense_id = e.id AND s.person_id = ?))
+        SELECT 1 FROM expense_shares s WHERE s.expense_id = e.id AND s.person_id = ?) OR EXISTS (
+        SELECT 1 FROM expense_payers p WHERE p.expense_id = e.id AND p.person_id = ?))
       UNION ALL
       SELECT 1 FROM settlements WHERE group_id = ? AND deleted_at IS NULL AND (from_id = ? OR to_id = ?)
       LIMIT 1
-    `).get(row.id, id, id, row.id, id, id);
+    `).get(row.id, id, id, id, row.id, id, id);
     if (used) throw conflict('No se puede quitar a alguien que aparece en gastos o pagos del grupo.');
-    db.prepare('DELETE FROM group_members WHERE group_id = ? AND person_id = ?').run(row.id, id);
-    return getGroupBundle(row.id, meId);
+    return transaction(() => {
+      const removed = db.prepare('DELETE FROM group_members WHERE group_id = ? AND person_id = ?').run(row.id, id);
+      if (Number(removed.changes)) logActivity(row.id, meId, 'member_removed', String(id), { personId: id, name: personName(id) });
+      return getGroupBundle(row.id, meId);
+    });
   }
 
   // ---------- Gastos ----------
 
-  function toExpense(row, shares) {
+  function toExpense(row, shares, payers) {
     return {
       id: row.id,
       groupId: row.group_id,
       description: row.description,
       spentOn: row.spent_on,
       payerId: row.payer_id,
+      payers: payers.length ? payers : [{ personId: row.payer_id, inputValue: row.original_minor, paidCents: row.base_cents }],
+      category: row.category ?? null,
+      createdBy: row.created_by ?? null,
+      updatedBy: row.updated_by ?? null,
       amountCents: row.base_cents,
       originalMinor: row.original_minor,
       currency: row.currency,
@@ -457,7 +637,9 @@ export function createRepository(db) {
     if (!row) throw notFound('Gasto no encontrado.');
     const shares = db.prepare('SELECT * FROM expense_shares WHERE expense_id = ? ORDER BY person_id').all(id)
       .map((share) => ({ personId: share.person_id, inputValue: share.input_value, owedCents: share.owed_cents }));
-    return toExpense(row, shares);
+    const payers = db.prepare('SELECT * FROM expense_payers WHERE expense_id = ? ORDER BY paid_cents DESC, person_id').all(id)
+      .map((payer) => ({ personId: payer.person_id, inputValue: payer.input_value, paidCents: payer.paid_cents }));
+    return toExpense(row, shares, payers);
   }
 
   // Importe del gasto. En la moneda del grupo basta amountCents. En otra moneda llega originalMinor
@@ -485,8 +667,15 @@ export function createRepository(db) {
   function parseExpenseInput(body, groupRow, id) {
     const groupId = groupRow.id;
     const members = new Set(memberIds(groupId));
-    const payerId = positiveId(body?.payerId, 'Quién pagó');
-    if (!members.has(payerId)) throw badRequest('Quien pagó tiene que ser del grupo.');
+    // Varios pagadores: payers = [{ personId, value }] en la moneda original. Uno solo: payerId.
+    const payerEntries = Array.isArray(body?.payers) && body.payers.length
+      ? body.payers
+      : [{ personId: positiveId(body?.payerId, 'Quién pagó'), value: null }];
+    for (const entry of payerEntries) {
+      if (!members.has(Number(entry?.personId))) throw badRequest('Quien pagó tiene que ser del grupo.');
+    }
+    const category = body?.category === undefined || body?.category === null || body?.category === '' ? null : String(body.category);
+    if (category !== null && !CATEGORY_KEYS.includes(category)) throw badRequest('Categoría no válida.');
     const splitMode = String(body?.splitMode || 'equal');
     if (!SPLIT_MODES.includes(splitMode)) throw badRequest('Modo de reparto no válido.');
     const entries = Array.isArray(body?.shares) ? body.shares : [];
@@ -495,8 +684,15 @@ export function createRepository(db) {
     }
     const money = parseMoneyInput(body, groupRow.base_currency);
     let shares;
+    let payers;
     try {
       shares = computeShares({ totalCents: money.amountCents, mode: splitMode, entries, seed: id, originalTotal: money.originalMinor });
+      payers = computePayers({
+        totalCents: money.amountCents,
+        originalTotal: money.originalMinor,
+        entries: payerEntries.map((entry) => ({ personId: entry.personId, value: entry.value ?? money.originalMinor })),
+        seed: id,
+      });
     } catch (error) {
       if (error instanceof SplitError) throw badRequest(error.message);
       throw error;
@@ -504,7 +700,9 @@ export function createRepository(db) {
     return {
       description: text(body?.description, 'la descripción', { max: 120 }),
       spentOn: isoDate(body?.spentOn),
-      payerId,
+      payerId: mainPayer(payers),
+      payers,
+      category,
       ...money,
       splitMode,
       notes: text(body?.notes, 'la nota', { max: 500, required: false }),
@@ -517,8 +715,40 @@ export function createRepository(db) {
     for (const share of shares) insert.run(expenseId, share.personId, share.inputValue, share.owedCents);
   }
 
+  function insertPayers(expenseId, payers) {
+    const insert = db.prepare('INSERT INTO expense_payers (expense_id, person_id, input_value, paid_cents) VALUES (?, ?, ?, ?)');
+    for (const payer of payers) insert.run(expenseId, payer.personId, payer.inputValue, payer.paidCents);
+  }
+
+  // Lo justo para la actividad y los avisos: qué gasto, cuánto, quién pagó y cuánto le toca a cada uno.
+  function expenseSummary(expense, groupRow) {
+    return {
+      description: expense.description,
+      amountCents: expense.amountCents,
+      currency: groupRow.base_currency,
+      originalMinor: expense.originalMinor,
+      originalCurrency: expense.currency,
+      payers: expense.payers.map((payer) => ({ personId: payer.personId, name: personName(payer.personId), paidCents: payer.paidCents })),
+      shares: expense.shares.map((share) => ({ personId: share.personId, owedCents: share.owedCents })),
+    };
+  }
+
+  function expenseChanges(before, after) {
+    const changes = [];
+    if (before.description !== after.description) changes.push('description');
+    if (before.amountCents !== after.amountCents || before.originalMinor !== after.originalMinor || before.currency !== after.currency) changes.push('amount');
+    // Quién pagó: cambian las personas o, si eran varias, cuánto puso cada una (no basta con que cambie el total).
+    const payerIds = (expense) => JSON.stringify(expense.payers.map((p) => p.personId).sort((a, b) => a - b));
+    const payerSplit = (expense) => JSON.stringify(expense.payers.map((p) => [p.personId, p.inputValue]).sort((a, b) => a[0] - b[0]));
+    if (payerIds(before) !== payerIds(after) || (after.payers.length > 1 && payerSplit(before) !== payerSplit(after))) changes.push('payers');
+    if (before.spentOn !== after.spentOn) changes.push('date');
+    if (JSON.stringify(before.shares.map((s) => [s.personId, s.owedCents])) !== JSON.stringify(after.shares.map((s) => [s.personId, s.owedCents]))) changes.push('split');
+    if (before.category !== after.category) changes.push('category');
+    return changes;
+  }
+
   // Idempotente: el móvil genera el UUID; si reintenta por mala conexión, no se duplica.
-  function createExpense(groupId, body) {
+  function createExpense(groupId, body, meId = null) {
     const id = uuid(body?.id);
     const row = getWritableGroupRow(groupId);
     const existing = db.prepare('SELECT group_id FROM expenses WHERE id = ?').get(id);
@@ -527,16 +757,20 @@ export function createRepository(db) {
       return { created: false, expense: getExpense(id) };
     }
     const input = parseExpenseInput(body, row, id);
-    transaction(() => {
+    const expense = transaction(() => {
       db.prepare(`
         INSERT INTO expenses (id, group_id, description, spent_on, payer_id, original_minor, currency, fx_rate, fx_source,
-          base_cents, split_mode, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          base_cents, split_mode, notes, category, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, row.id, input.description, input.spentOn, input.payerId, input.originalMinor, input.currency, input.fxRate,
-        input.fxSource, input.amountCents, input.splitMode, input.notes);
+        input.fxSource, input.amountCents, input.splitMode, input.notes, input.category, meId);
       insertShares(id, input.shares);
+      insertPayers(id, input.payers);
+      const created = getExpense(id);
+      logActivity(row.id, meId, 'expense_created', id, expenseSummary(created, row));
+      return created;
     });
-    return { created: true, expense: getExpense(id) };
+    return { created: true, expense };
   }
 
   function getEditableExpenseRow(rawId) {
@@ -548,48 +782,74 @@ export function createRepository(db) {
   }
 
   // Control optimista: si otro dispositivo lo cambió antes, 409 con la versión actual.
-  function updateExpense(rawId, body) {
+  function updateExpense(rawId, body, meId = null) {
     const row = getEditableExpenseRow(rawId);
     if (row.deleted_at !== null) throw conflict('Este gasto se ha borrado.');
     if (Number(body?.version) !== row.version) {
       throw conflict('Este gasto ha cambiado en otro dispositivo.', { expense: getExpense(row.id) });
     }
-    const input = parseExpenseInput(body, getGroupRow(row.group_id), row.id);
-    transaction(() => {
+    const groupRow = getGroupRow(row.group_id);
+    const input = parseExpenseInput(body, groupRow, row.id);
+    return transaction(() => {
+      const before = getExpense(row.id);
       const result = db.prepare(`
         UPDATE expenses SET description = ?, spent_on = ?, payer_id = ?, original_minor = ?, currency = ?, fx_rate = ?,
-          fx_source = ?, base_cents = ?, split_mode = ?, notes = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          fx_source = ?, base_cents = ?, split_mode = ?, notes = ?, category = ?, updated_by = ?,
+          version = version + 1, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND version = ?
       `).run(input.description, input.spentOn, input.payerId, input.originalMinor, input.currency, input.fxRate,
-        input.fxSource, input.amountCents, input.splitMode, input.notes, row.id, row.version);
+        input.fxSource, input.amountCents, input.splitMode, input.notes, input.category, meId, row.id, row.version);
       if (Number(result.changes) !== 1) throw conflict('Este gasto ha cambiado en otro dispositivo.');
       db.prepare('DELETE FROM expense_shares WHERE expense_id = ?').run(row.id);
       insertShares(row.id, input.shares);
+      db.prepare('DELETE FROM expense_payers WHERE expense_id = ?').run(row.id);
+      insertPayers(row.id, input.payers);
+      const after = getExpense(row.id);
+      const changes = expenseChanges(before, after);
+      if (changes.length) {
+        logActivity(row.group_id, meId, 'expense_updated', row.id, {
+          ...expenseSummary(after, groupRow),
+          changes,
+          before: { description: before.description, amountCents: before.amountCents },
+        });
+      }
+      return after;
     });
-    return getExpense(row.id);
   }
 
   // También con control de versión: no se borra un gasto que otro dispositivo acaba de cambiar.
-  function deleteExpense(rawId, body) {
+  function deleteExpense(rawId, body, meId = null) {
     const row = getEditableExpenseRow(rawId);
     if (row.deleted_at !== null) return getExpense(row.id);
     if (Number(body?.version) !== row.version) {
       throw conflict('Este gasto ha cambiado en otro dispositivo.', { expense: getExpense(row.id) });
     }
-    db.prepare('UPDATE expenses SET deleted_at = CURRENT_TIMESTAMP, version = version + 1 WHERE id = ? AND version = ?').run(row.id, row.version);
-    return getExpense(row.id);
+    return transaction(() => {
+      db.prepare('UPDATE expenses SET deleted_at = CURRENT_TIMESTAMP, version = version + 1 WHERE id = ? AND version = ?').run(row.id, row.version);
+      const expense = getExpense(row.id);
+      logActivity(row.group_id, meId, 'expense_deleted', row.id, expenseSummary(expense, getGroupRow(row.group_id)));
+      return expense;
+    });
   }
 
-  function restoreExpense(rawId) {
+  function restoreExpense(rawId, meId = null) {
     const row = getEditableExpenseRow(rawId);
     if (row.deleted_at === null) return getExpense(row.id);
     const members = new Set(memberIds(row.group_id));
-    const people = [row.payer_id, ...db.prepare('SELECT person_id FROM expense_shares WHERE expense_id = ?').all(row.id).map((s) => s.person_id)];
+    const people = [
+      row.payer_id,
+      ...db.prepare('SELECT person_id FROM expense_shares WHERE expense_id = ?').all(row.id).map((s) => s.person_id),
+      ...db.prepare('SELECT person_id FROM expense_payers WHERE expense_id = ?').all(row.id).map((p) => p.person_id),
+    ];
     if (people.some((personId) => !members.has(personId))) {
       throw conflict('No se puede restaurar: alguna persona del gasto ya no está en el grupo.');
     }
-    db.prepare('UPDATE expenses SET deleted_at = NULL, version = version + 1 WHERE id = ?').run(row.id);
-    return getExpense(row.id);
+    return transaction(() => {
+      db.prepare('UPDATE expenses SET deleted_at = NULL, version = version + 1 WHERE id = ?').run(row.id);
+      const expense = getExpense(row.id);
+      logActivity(row.group_id, meId, 'expense_restored', row.id, expenseSummary(expense, getGroupRow(row.group_id)));
+      return expense;
+    });
   }
 
   // ---------- Liquidaciones ----------
@@ -600,7 +860,18 @@ export function createRepository(db) {
     return { ...toSettlement(row), deleted: row.deleted_at !== null };
   }
 
-  function createSettlement(groupId, body) {
+  function settlementSummary(settlement, currency) {
+    return {
+      fromId: settlement.fromId,
+      fromName: personName(settlement.fromId),
+      toId: settlement.toId,
+      toName: personName(settlement.toId),
+      amountCents: settlement.amountCents,
+      currency,
+    };
+  }
+
+  function createSettlement(groupId, body, meId = null) {
     const id = uuid(body?.id);
     const row = getWritableGroupRow(groupId);
     const existing = db.prepare('SELECT group_id FROM settlements WHERE id = ?').get(id);
@@ -615,9 +886,14 @@ export function createRepository(db) {
     if (fromId === toId) throw badRequest('Quien paga y quien recibe no pueden ser la misma persona.');
     const amountCents = cents(body?.amountCents);
     const paidOn = isoDate(body?.paidOn);
-    db.prepare('INSERT INTO settlements (id, group_id, from_id, to_id, amount_cents, paid_on) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, row.id, fromId, toId, amountCents, paidOn);
-    return { created: true, settlement: getSettlement(id) };
+    const settlement = transaction(() => {
+      db.prepare('INSERT INTO settlements (id, group_id, from_id, to_id, amount_cents, paid_on, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, row.id, fromId, toId, amountCents, paidOn, meId);
+      const created = getSettlement(id);
+      logActivity(row.id, meId, 'settlement_created', id, settlementSummary(created, row.base_currency));
+      return created;
+    });
+    return { created: true, settlement };
   }
 
   function getEditableSettlementRow(rawId) {
@@ -628,23 +904,44 @@ export function createRepository(db) {
     return row;
   }
 
-  function deleteSettlement(rawId) {
+  function deleteSettlement(rawId, meId = null) {
     const row = getEditableSettlementRow(rawId);
-    db.prepare('UPDATE settlements SET deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP) WHERE id = ?').run(row.id);
-    return getSettlement(row.id);
+    if (row.deleted_at !== null) return getSettlement(row.id);
+    return transaction(() => {
+      db.prepare('UPDATE settlements SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?').run(row.id);
+      const settlement = getSettlement(row.id);
+      logActivity(row.group_id, meId, 'settlement_deleted', row.id, settlementSummary(settlement, getGroupRow(row.group_id).base_currency));
+      return settlement;
+    });
   }
 
-  function restoreSettlement(rawId) {
+  function restoreSettlement(rawId, meId = null) {
     const row = getEditableSettlementRow(rawId);
+    if (row.deleted_at === null) return getSettlement(row.id);
     const members = new Set(memberIds(row.group_id));
     if (!members.has(row.from_id) || !members.has(row.to_id)) {
       throw conflict('No se puede restaurar: alguna persona del pago ya no está en el grupo.');
     }
-    db.prepare('UPDATE settlements SET deleted_at = NULL WHERE id = ?').run(row.id);
-    return getSettlement(row.id);
+    return transaction(() => {
+      db.prepare('UPDATE settlements SET deleted_at = NULL WHERE id = ?').run(row.id);
+      const settlement = getSettlement(row.id);
+      logActivity(row.group_id, meId, 'settlement_restored', row.id, settlementSummary(settlement, getGroupRow(row.group_id).base_currency));
+      return settlement;
+    });
   }
 
   return {
+    listActivity,
+    unreadCount,
+    markActivitySeen,
+    getSetting,
+    setSetting,
+    savePushSubscription,
+    deletePushSubscription,
+    forgetPushEndpoint,
+    pushTargets,
+    groupTitle,
+    personName,
     ensureAuthPerson,
     listPeople,
     findOrCreatePerson,

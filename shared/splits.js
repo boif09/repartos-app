@@ -2,6 +2,35 @@ import { allocate } from './money.js';
 
 export const SPLIT_MODES = ['equal', 'shares', 'exact'];
 
+// Quién pagó y cuánto. entries = [{ personId, value }] con lo que puso cada uno en la moneda ORIGINAL
+// (deben sumar originalTotal). Devuelve [{ personId, inputValue, paidCents }] con Σ paidCents === totalCents.
+export function computePayers({ totalCents, originalTotal = totalCents, entries, seed = '' }) {
+  if (!Array.isArray(entries) || !entries.length) throw new SplitError('Falta quién pagó.');
+  const seen = new Set();
+  const payers = [];
+  for (const entry of entries) {
+    const personId = Number(entry?.personId);
+    if (!Number.isSafeInteger(personId) || personId <= 0) throw new SplitError('Pagador no válido.');
+    if (seen.has(personId)) throw new SplitError('Hay un pagador repetido.');
+    seen.add(personId);
+    const value = Number(entry.value);
+    if (!Number.isSafeInteger(value) || value < 0) throw new SplitError('Lo que pagó cada uno debe ser un importe positivo.');
+    if (value > 0) payers.push({ personId, value });
+  }
+  if (!payers.length) throw new SplitError('Falta quién pagó.');
+  const paid = payers.reduce((sum, payer) => sum + payer.value, 0);
+  if (paid !== originalTotal) throw new SplitError('Lo que pagó cada uno no suma el total del gasto.');
+  const cents = originalTotal === totalCents
+    ? payers.map((payer) => payer.value)
+    : allocate(totalCents, payers.map((payer) => payer.value), `${seed}:pagadores`);
+  return payers.map((payer, index) => ({ personId: payer.personId, inputValue: payer.value, paidCents: cents[index] }));
+}
+
+// El pagador principal (el que más puso; si empatan, el primero): se guarda en expenses.payer_id.
+export function mainPayer(payers) {
+  return payers.reduce((best, payer) => (payer.paidCents > best.paidCents ? payer : best), payers[0]).personId;
+}
+
 export class SplitError extends Error {}
 
 // Calcula cuánto debe cada participante de un gasto.

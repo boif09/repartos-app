@@ -97,6 +97,8 @@
 }
 
 * { box-sizing: border-box; }
+/* hidden siempre oculta, aunque la clase del elemento fije otro display (p. ej. .btn). */
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;
@@ -594,6 +596,53 @@ input:focus { border-color: var(--accent); }
 
 .home-links { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
 .home-links .btn { font-size: var(--fs-md); }
+
+/* ---------- Actividad, resumen, buscador, pagadores ---------- */
+
+.icon-btn.bell { position: relative; }
+.icon-btn .dot {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--danger);
+  color: var(--danger-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+.activity-row { align-items: flex-start; }
+.activity-row .row-main strong.wrap { white-space: normal; font-weight: 400; }
+.activity-row.unread .row-main strong.wrap { font-weight: 600; }
+.unread-dot { width: 8px; height: 8px; margin-top: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+.author-line { margin: -4px 0 0; text-align: center; }
+
+.meta .icon { width: 14px; height: 14px; vertical-align: -2px; margin-right: 4px; }
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--control);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--muted);
+}
+.search-box:focus-within { border-color: var(--accent); }
+.search-box .search-input { flex: 1; min-height: 44px; border: 0; padding: 0; background: transparent; color: var(--text); font: inherit; font-size: 16px; outline: none; }
+
+.group-icon.small-icon { width: 32px; height: 32px; border-radius: var(--r-sm); }
+.category-row .row-main { gap: 6px; }
+.bar { display: block; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+
+.payers-box[hidden] { display: none; }
+.payers-box { gap: 8px; padding: 12px 16px; }
+.payers-box .list .row { padding-left: 0; padding-right: 0; }
 
 /* ---------- Divisas ---------- */
 

@@ -14,6 +14,8 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 | F3 | Moneda por grupo y por gasto, tipo del BCE (Frankfurter) con caché, tipo manual y "me cobraron" | ✅ |
 | F4 | PWA instalable, consulta sin conexión, enlace de solo lectura para amigos, ficha de persona | ✅ |
 | F5 | Despliegue en `repartos.jusboif.es`, script de despliegue y copias diarias | ✅ ([guía](docs/DESPLIEGUE.md)) |
+| F6 | Apariencia clara/oscura, gastos y pagos sin conexión con sincronización automática | ✅ |
+| F7 | Varios pagadores por gasto, autoría y actividad con novedades, avisos push, resumen del grupo, categorías y búsqueda | ✅ |
 
 ## Requisitos
 
@@ -53,6 +55,7 @@ npm test
 | `BASE_PATH` | `/` | Ruta pública (la app vive en la raíz de `repartos.jusboif.es`) |
 | `DB_PATH` | `data/repartos.db` | Base de datos SQLite |
 | `FX_API_URL` | `https://api.frankfurter.dev/v1` | API de tipos de cambio del BCE |
+| `PUSH_SUBJECT` | `https://repartos.jusboif.es` | Contacto VAPID que se envía a los servicios de avisos push |
 | `NODE_ENV` | — | `production` exige `APP_USERS` y prohíbe `DEV_REMOTE_USER` |
 
 ## Login y seguridad
@@ -95,8 +98,9 @@ src/app.js           Router HTTP, estáticos, cabeceras de seguridad, API
 src/auth.js          Usuario de Authelia (cabecera Remote-User)
 src/database.js      SQLite y migraciones (PRAGMA user_version)
 src/fx.js            Tipos de cambio del BCE con caché en SQLite
+src/push.js          Avisos push sin dependencias (cifrado RFC 8291 y VAPID)
 src/repository.js    Consultas, validación y transacciones
-shared/              Dominio común servidor/navegador: dinero, repartos, saldos, minimizar pagos
+shared/              Dominio común servidor/navegador: dinero, repartos, pagadores, saldos, minimizar pagos, categorías
 public/              Frontend vanilla (móvil primero), manifest y service worker (sw.js)
 scripts/             make-icons.js (iconos PNG) y backup-db.js (copia de la base de datos)
 deploy-repartos.sh   Actualización en el servidor

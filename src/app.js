@@ -7,6 +7,7 @@ import { parseUserList, resolveUser } from './auth.js';
 import { HttpError } from './errors.js';
 import { createRepository } from './repository.js';
 import { createFxService } from './fx.js';
+import { createPushService } from './push.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
@@ -119,7 +120,14 @@ export function createApp(options = {}) {
     allowedUsers: options.auth?.allowedUsers ?? parseUserList(process.env.APP_USERS),
   };
   const prefix = basePath === '/' ? '' : basePath;
-  const repo = createRepository(db);
+  // Cada cambio confirmado puede generar avisos push para el resto del grupo (sin bloquear la respuesta).
+  let push = null;
+  const repo = createRepository(db, {
+    onActivity: (event) => {
+      push?.notify(event).catch((error) => console.error('Error en avisos push:', error));
+    },
+  });
+  push = createPushService(repo, options.push);
   const fx = createFxService(db, options.fx);
 
   // [método, patrón, handler(ctx)] -> handler devuelve [status, body]. ctx = { params, body, me }.
@@ -130,7 +138,12 @@ export function createApp(options = {}) {
     ['PATCH', /^\/people\/(\d+)$/, ({ params, body }) => [200, { person: repo.renamePerson(params[0], body.name) }]],
     ['GET', /^\/people\/(\d+)\/summary$/, ({ params }) => [200, repo.personSummary(params[0])]],
 
-    ['GET', /^\/groups$/, ({ me }) => [200, { groups: repo.listGroups(me.id) }]],
+    ['GET', /^\/groups$/, ({ me }) => [200, { groups: repo.listGroups(me.id), unreadActivity: repo.unreadCount(me.id) }]],
+    ['GET', /^\/activity$/, ({ me, query }) => [200, repo.listActivity(me.id, { before: query.get('before'), limit: query.get('limit') })]],
+    ['POST', /^\/activity\/seen$/, ({ me, body }) => [200, repo.markActivitySeen(me.id, body.lastId)]],
+    ['GET', /^\/push\/key$/, () => [200, { publicKey: push.publicKey() }]],
+    ['POST', /^\/push\/subscriptions$/, ({ me, body }) => [200, repo.savePushSubscription(me.id, body.subscription)]],
+    ['DELETE', /^\/push\/subscriptions$/, ({ me, body }) => [200, repo.deletePushSubscription(me.id, body.endpoint)]],
     ['POST', /^\/groups$/, ({ body, me }) => [201, repo.createGroup(body, me.id)]],
     ['GET', /^\/groups\/(\d+)$/, ({ params, me }) => [200, repo.getGroupBundle(params[0], me.id)]],
     ['PATCH', /^\/groups\/(\d+)$/, ({ params, body, me }) => [200, repo.updateGroup(params[0], body, me.id)]],
@@ -139,20 +152,20 @@ export function createApp(options = {}) {
     ['POST', /^\/groups\/(\d+)\/members$/, ({ params, body, me }) => [200, repo.addMember(params[0], body, me.id)]],
     ['DELETE', /^\/groups\/(\d+)\/members\/(\d+)$/, ({ params, me }) => [200, repo.removeMember(params[0], params[1], me.id)]],
 
-    ['POST', /^\/groups\/(\d+)\/expenses$/, ({ params, body }) => {
-      const { created, expense } = repo.createExpense(params[0], body);
+    ['POST', /^\/groups\/(\d+)\/expenses$/, ({ params, body, me }) => {
+      const { created, expense } = repo.createExpense(params[0], body, me.id);
       return [created ? 201 : 200, { expense }];
     }],
-    ['PUT', /^\/expenses\/([\w-]+)$/, ({ params, body }) => [200, { expense: repo.updateExpense(params[0], body) }]],
-    ['DELETE', /^\/expenses\/([\w-]+)$/, ({ params, body }) => [200, { expense: repo.deleteExpense(params[0], body) }]],
-    ['POST', /^\/expenses\/([\w-]+)\/restore$/, ({ params }) => [200, { expense: repo.restoreExpense(params[0]) }]],
+    ['PUT', /^\/expenses\/([\w-]+)$/, ({ params, body, me }) => [200, { expense: repo.updateExpense(params[0], body, me.id) }]],
+    ['DELETE', /^\/expenses\/([\w-]+)$/, ({ params, body, me }) => [200, { expense: repo.deleteExpense(params[0], body, me.id) }]],
+    ['POST', /^\/expenses\/([\w-]+)\/restore$/, ({ params, me }) => [200, { expense: repo.restoreExpense(params[0], me.id) }]],
 
-    ['POST', /^\/groups\/(\d+)\/settlements$/, ({ params, body }) => {
-      const { created, settlement } = repo.createSettlement(params[0], body);
+    ['POST', /^\/groups\/(\d+)\/settlements$/, ({ params, body, me }) => {
+      const { created, settlement } = repo.createSettlement(params[0], body, me.id);
       return [created ? 201 : 200, { settlement }];
     }],
-    ['DELETE', /^\/settlements\/([\w-]+)$/, ({ params }) => [200, { settlement: repo.deleteSettlement(params[0]) }]],
-    ['POST', /^\/settlements\/([\w-]+)\/restore$/, ({ params }) => [200, { settlement: repo.restoreSettlement(params[0]) }]],
+    ['DELETE', /^\/settlements\/([\w-]+)$/, ({ params, me }) => [200, { settlement: repo.deleteSettlement(params[0], me.id) }]],
+    ['POST', /^\/settlements\/([\w-]+)\/restore$/, ({ params, me }) => [200, { settlement: repo.restoreSettlement(params[0], me.id) }]],
   ];
 
   async function handleApi(req, res, route, query) {

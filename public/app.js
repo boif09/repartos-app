@@ -5,7 +5,9 @@ import { allocate, centsToInput, currencyExponent, formatMoney, parseAmount } fr
 import { convertMinor, parseRate } from './shared/fx.js';
 import { mergePending, pendingDelta } from './shared/pending.js';
 import { listItems, outboxAvailable, putItem, removeItem } from './outbox.js';
-import { computeShares, SplitError } from './shared/splits.js';
+import { computePayers, computeShares, mainPayer, SplitError } from './shared/splits.js';
+import { payersOf } from './shared/balances.js';
+import { CATEGORIES, categoryOf, guessCategory } from './shared/categories.js';
 
 const appEl = document.getElementById('app');
 const GROUP_EMOJIS = ['👥', '❤️', '🏠', '✈️', '🏖️', '⛰️', '🍻', '🎉'];
@@ -293,6 +295,15 @@ const ICONS = {
   plus: ['M12 5v14', 'M5 12h14'],
   swap: ['M7 7h11l-3-3', 'M17 17H6l3 3'],
   check: ['M20 6L9 17l-5-5'],
+  bell: ['M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9', 'M10.3 21a1.9 1.9 0 0 0 3.4 0'],
+  search: ['M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z', 'M21 21l-4.3-4.3'],
+  food: ['M4 3v8a3 3 0 0 0 3 3v7', 'M10 3v8a3 3 0 0 1-3 3', 'M7 3v6', 'M17 3c-1.7 0-3 2-3 5s1.3 4 3 4v9'],
+  cart: ['M9 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2z', 'M18 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2z', 'M2 3h3l2.6 12.4a1.5 1.5 0 0 0 1.5 1.1h8.8a1.5 1.5 0 0 0 1.5-1.1L21 7H6'],
+  car: ['M5 17h14', 'M5 17a2 2 0 1 0 4 0', 'M15 17a2 2 0 1 0 4 0', 'M3 17v-5l2-5h14l2 5v5', 'M3 12h18'],
+  bed: ['M3 7v12', 'M21 19v-6a3 3 0 0 0-3-3H3', 'M3 15h18', 'M7 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'],
+  ticket: ['M3 9a3 3 0 0 0 0 6v3a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-3a3 3 0 0 0 0-6V6a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1z', 'M14 5v2', 'M14 11v2', 'M14 17v2'],
+  bag: ['M6 7h12l1 14H5L6 7z', 'M9 7a3 3 0 0 1 6 0'],
+  tag: ['M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z', 'M7.5 7.5h.01'],
   cloudOff: ['M2 2l20 20', 'M5.8 5.8A7 7 0 0 0 9 19h8.5', 'M20.5 16.5A4.5 4.5 0 0 0 17.5 9h-1.3A7 7 0 0 0 9.5 5.1'],
   moon: ['M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'],
   contrast: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 3v18', 'M12 7h4.5', 'M12 11h6.5', 'M12 15h6', 'M12 19h3'],
@@ -538,7 +549,7 @@ function loading() {
 // ---------- Vistas ----------
 
 async function groupsView() {
-  const [{ groups: serverGroups }, items] = await Promise.all([api('groups'), refreshPending()]);
+  const [{ groups: serverGroups, unreadActivity = 0 }, items] = await Promise.all([api('groups'), refreshPending()]);
   // Los pendientes de cada grupo ya cuentan en "te deben / debes".
   const groups = serverGroups.map((group) => (group.myBalanceCents === null ? group
     : { ...group, myBalanceCents: group.myBalanceCents + pendingDelta(items, group.id, session.person.id, group.baseCurrency) }));
@@ -576,6 +587,9 @@ async function groupsView() {
       title: 'Repartos',
       action: el('span', { class: 'topbar-actions' },
         themeButton(),
+        el('a', { class: 'icon-btn bell', href: '#/actividad', 'aria-label': unreadActivity ? `Actividad: ${unreadActivity} novedades` : 'Actividad' },
+          icon('bell'),
+          unreadActivity > 0 && el('span', { class: 'dot', text: unreadActivity > 9 ? '9+' : String(unreadActivity) })),
         el('a', { class: 'me-link', href: '#/personas', 'aria-label': 'Personas y saldos' }, avatar(session.person.id, session.person.name))),
     }),
     el('section', { class: 'content' },
@@ -673,16 +687,18 @@ async function newGroupView() {
   title.focus();
 }
 
-function timeline(bundle, people) {
+function timeline(bundle, people, { emptyText } = {}) {
   const items = [
     ...bundle.expenses.map((expense) => ({ type: 'expense', date: expense.spentOn, createdAt: expense.createdAt, data: expense })),
     ...bundle.settlements.map((settlement) => ({ type: 'settlement', date: settlement.paidOn, createdAt: settlement.createdAt, data: settlement })),
   ].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
 
   if (!items.length) {
-    return el('div', { class: 'card empty' },
-      el('h2', { text: 'Sin gastos todavía' }),
-      el('p', { text: 'Pulsa + para añadir el primero.' }));
+    return emptyText
+      ? el('div', { class: 'card empty' }, el('p', { text: emptyText }))
+      : el('div', { class: 'card empty' },
+        el('h2', { text: 'Sin gastos todavía' }),
+        el('p', { text: 'Pulsa + para añadir el primero.' }));
   }
 
   const meId = session?.person.id ?? null;
@@ -707,11 +723,13 @@ function timeline(bundle, people) {
     if (item.type === 'expense') {
       const expense = item.data;
       const myShare = expense.shares.find((share) => share.personId === meId)?.owedCents ?? 0;
+      const myPaid = payersOf({ ...expense, baseCents: expense.amountCents }).find((payer) => payer.personId === meId)?.paidCents ?? 0;
+      const net = myPaid - myShare;
       let impact = null;
       if (meId === null) impact = null;
-      else if (expense.payerId === meId) impact = { text: `prestaste ${formatMoney(expense.amountCents - myShare, cur)}`, tone: 'positive' };
-      else if (myShare > 0) impact = { text: `debes ${formatMoney(myShare, cur)}`, tone: 'negative' };
-      else impact = { text: 'no participas', tone: 'muted' };
+      else if (net > 0) impact = { text: `prestaste ${formatMoney(net, cur)}`, tone: 'positive' };
+      else if (net < 0) impact = { text: `debes ${formatMoney(-net, cur)}`, tone: 'negative' };
+      else impact = { text: myShare || myPaid ? 'en paz' : 'no participas', tone: 'muted' };
       dayCard.append(el('a', {
         class: 'row',
         href: editable ? `#/g/${bundle.group.id}/gasto/${expense.id}` : undefined,
@@ -719,7 +737,9 @@ function timeline(bundle, people) {
       avatar(expense.payerId, people.get(expense.payerId)?.name),
       el('span', { class: 'row-main' },
         el('strong', { text: expense.description }),
-        el('span', { class: 'meta', text: `${expense.payerId === meId ? 'Pagaste' : `Pagó ${personName(people, expense.payerId)}`} · ${splitSummary(expense, bundle.members.length)}` })),
+        el('span', { class: 'meta' },
+          expense.category && categoryIcon(expense.category, { small: true }),
+          `${payersText(expense, people, meId)} · ${splitSummary(expense, bundle.members.length)}`)),
       el('span', { class: 'row-side' },
         el('strong', { text: formatMoney(expense.originalMinor, expense.currency) }),
         expense.currency !== cur && el('span', { class: 'muted small num', text: `≈ ${formatMoney(expense.amountCents, cur)}` }),
@@ -823,6 +843,93 @@ function balanceHero(bundle, tab) {
       tab === 'saldos' ? el('a', { href: base, text: 'Ver gastos' }) : el('a', { href: `${base}/saldos`, text: 'Ver saldos' })));
 }
 
+// Buscador sobre la lista de gastos: por descripción, categoría o quién pagó.
+function searchableTimeline(bundle, people) {
+  const cur = bundle.group.baseCurrency;
+  if (bundle.expenses.length < 4) return timeline(bundle, people);
+  const input = el('input', { type: 'search', class: 'search-input', placeholder: 'Buscar gastos', 'aria-label': 'Buscar gastos', autocomplete: 'off' });
+  const results = el('div', { class: 'stack' });
+  const matches = (expense, query) => normalizeSearch([
+    expense.description,
+    expense.category ? categoryOf(expense.category).label : '',
+    ...payersOf({ ...expense, baseCents: expense.amountCents }).map((payer) => people.get(payer.personId)?.name ?? ''),
+  ].join(' ')).includes(query);
+  const update = () => {
+    const query = normalizeSearch(input.value);
+    if (!query) {
+      results.replaceChildren(timeline(bundle, people));
+      return;
+    }
+    const found = bundle.expenses.filter((expense) => matches(expense, query));
+    const total = found.filter((expense) => !expense.error).reduce((sum, expense) => sum + expense.amountCents, 0);
+    results.replaceChildren(
+      el('p', { class: 'muted small', text: `${plural(found.length, 'gasto', 'gastos')} · ${formatMoney(total, cur)}` }),
+      timeline({ ...bundle, expenses: found, settlements: [] }, people, { emptyText: 'Ningún gasto coincide con la búsqueda.' }));
+  };
+  input.addEventListener('input', update);
+  update();
+  return el('div', { class: 'stack' }, el('label', { class: 'search-box' }, icon('search', { small: true }), input), results);
+}
+
+// Cuánto ha costado el grupo o el viaje, quién pagó, a quién le corresponde y en qué se fue.
+function summaryPanel(bundle, people) {
+  const cur = bundle.group.baseCurrency;
+  const expenses = bundle.expenses.filter((expense) => !expense.error);
+  if (!expenses.length) return el('div', { class: 'card empty' }, el('p', { text: 'Aún no hay gastos que resumir.' }));
+
+  const total = expenses.reduce((sum, expense) => sum + expense.amountCents, 0);
+  const dates = expenses.map((expense) => expense.spentOn).sort();
+  const days = Math.round((new Date(`${dates.at(-1)}T12:00:00`) - new Date(`${dates[0]}T12:00:00`)) / 86400000) + 1;
+  const range = days === 1 ? formatDay(dates[0]) : `del ${dayYearFormat.format(new Date(`${dates[0]}T12:00:00`))} al ${dayYearFormat.format(new Date(`${dates.at(-1)}T12:00:00`))}`;
+
+  const paid = new Map();
+  const owed = new Map();
+  const byCategory = new Map();
+  for (const expense of expenses) {
+    for (const payer of payersOf({ ...expense, baseCents: expense.amountCents })) paid.set(payer.personId, (paid.get(payer.personId) || 0) + payer.paidCents);
+    for (const share of expense.shares) owed.set(share.personId, (owed.get(share.personId) || 0) + share.owedCents);
+    const key = expense.category || 'other';
+    byCategory.set(key, (byCategory.get(key) || 0) + expense.amountCents);
+  }
+  const bar = (value) => {
+    const fill = el('span');
+    fill.style.width = `${Math.max(2, Math.round((value / total) * 100))}%`;
+    return el('span', { class: 'bar', 'aria-hidden': 'true' }, fill);
+  };
+  const percent = (value) => `${Math.round((value / total) * 100)} %`;
+
+  return el('div', { class: 'stack' },
+    el('div', { class: 'card summary' },
+      el('span', { class: 'muted small', text: 'Gasto total' }),
+      el('strong', { class: 'big', text: formatMoney(total, cur) }),
+      el('span', { class: 'muted small', text: [
+        plural(expenses.length, 'gasto', 'gastos'),
+        range,
+        days > 1 ? `${formatMoney(Math.round(total / days), cur)} al día` : null,
+      ].filter(Boolean).join(' · ') })),
+    el('h2', { class: 'section-title', text: 'Por persona' }),
+    el('div', { class: 'card list' },
+      bundle.members
+        .filter((member) => paid.get(member.id) || owed.get(member.id))
+        .sort((a, b) => (owed.get(b.id) || 0) - (owed.get(a.id) || 0))
+        .map((member) => el('div', { class: 'row static' },
+          avatar(member.id, member.name),
+          el('span', { class: 'row-main' },
+            el('strong', { text: personName(people, member.id) }),
+            el('span', { class: 'meta', text: `Pagó ${formatMoney(paid.get(member.id) || 0, cur)}` })),
+          el('span', { class: 'row-side' },
+            el('strong', { class: 'amount', text: formatMoney(owed.get(member.id) || 0, cur) }),
+            el('span', { class: 'small muted', text: 'su parte' }))))),
+    el('h2', { class: 'section-title', text: 'Por categoría' }),
+    el('div', { class: 'card list' },
+      [...byCategory].sort((a, b) => b[1] - a[1]).map(([key, value]) => el('div', { class: 'row static category-row' },
+        el('span', { class: 'group-icon small-icon', 'aria-hidden': 'true' }, categoryIcon(key, { small: true })),
+        el('span', { class: 'row-main' }, el('strong', { text: categoryOf(key).label }), bar(value)),
+        el('span', { class: 'row-side' },
+          el('strong', { class: 'amount', text: formatMoney(value, cur) }),
+          el('span', { class: 'small muted', text: percent(value) }))))));
+}
+
 async function groupView(groupId, tab) {
   const [serverBundle, items] = await Promise.all([api(`groups/${groupId}`), refreshPending()]);
   const bundle = mergePending(serverBundle, items, session.person.id);
@@ -840,9 +947,11 @@ async function groupView(groupId, tab) {
       bundle.group.archived && el('div', { class: 'banner', text: 'Grupo archivado: solo lectura.' }),
       balanceHero(bundle, tab),
       el('nav', { class: 'tabs', 'aria-label': 'Secciones del grupo' },
-        el('a', { href: base, class: tab === 'saldos' ? 'tab' : 'tab active', 'aria-current': tab === 'saldos' ? undefined : 'page', text: 'Gastos' }),
-        el('a', { href: `${base}/saldos`, class: tab === 'saldos' ? 'tab active' : 'tab', 'aria-current': tab === 'saldos' ? 'page' : undefined, text: 'Saldos' })),
-      tab === 'saldos' ? balancesPanel(bundle, people) : timeline(bundle, people)),
+        [['gastos', 'Gastos', base], ['saldos', 'Saldos', `${base}/saldos`], ['resumen', 'Resumen', `${base}/resumen`]].map(([key, label, href]) =>
+          el('a', { href, class: tab === key ? 'tab active' : 'tab', 'aria-current': tab === key ? 'page' : undefined, text: label }))),
+      tab === 'saldos' ? balancesPanel(bundle, people)
+        : tab === 'resumen' ? summaryPanel(bundle, people)
+          : searchableTimeline(bundle, people)),
     !bundle.group.archived && el('a', { class: 'fab', href: `${base}/gasto` }, icon('plus'), 'Gasto'));
 }
 
@@ -932,11 +1041,36 @@ function pickerChip({ leading, label, text, options, value, onChange, ariaLabel 
     onChange: () => onChange(select.value, { setText: (next) => { textNode.textContent = next; }, setLeading: (node) => leadingSlot.replaceChildren(node) }),
   }, options.map(([optionValue, optionLabel]) => el('option', { value: String(optionValue), text: optionLabel })));
   select.value = String(value);
-  return el('span', { class: 'picker-chip' },
+  const node = el('span', { class: 'picker-chip' },
     leadingSlot,
     el('span', { class: 'picker-text' }, label && el('span', { class: 'picker-label', text: label }), textNode),
     icon('down', { small: true }),
     select);
+  // Para cambiarlo sin que lo toque la persona (p. ej. la categoría sugerida al escribir).
+  node.update = ({ value: next, text: nextText, leading: nextLeading }) => {
+    select.value = String(next);
+    textNode.textContent = nextText;
+    leadingSlot.replaceChildren(nextLeading);
+  };
+  return node;
+}
+
+function categoryIcon(key, options) {
+  return icon(key ? categoryOf(key).icon : 'tag', options);
+}
+
+// "Pagaste", "Pagó Judit" o, si pagaron varios, "Pagado por ti y Judit".
+function payersText(expense, people, meId) {
+  const payers = payersOf({ ...expense, baseCents: expense.amountCents });
+  if (payers.length === 1) {
+    return payers[0].personId === meId ? 'Pagaste' : `Pagó ${personName(people, payers[0].personId)}`;
+  }
+  const names = payers.map((payer) => (payer.personId === meId ? 'ti' : people.get(payer.personId)?.name ?? '¿?'));
+  return `Pagado por ${names.slice(0, -1).join(', ')} y ${names.at(-1)}`;
+}
+
+function normalizeSearch(value) {
+  return String(value ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
 
 // Chip de fecha: muestra "Hoy", "Ayer" o "2 nov" y abre el calendario nativo.
@@ -1000,6 +1134,15 @@ async function expenseFormView(groupId, expenseId, query) {
     return [member.id, participants.has(member.id) ? 1 : 0];
   }));
 
+  // Varios pagadores: lo que puso cada uno, como texto en la moneda del gasto.
+  let multiPayers = (editing?.payers?.length ?? 0) > 1;
+  const payerInputs = new Map(members.map((member) => {
+    const paid = multiPayers ? editing.payers.find((payer) => payer.personId === member.id) : null;
+    return [member.id, paid ? centsToInput(paid.inputValue, exp()) : ''];
+  }));
+  let category = editing ? editing.category : guessCategory(draft?.description ?? '');
+  let categoryTouched = Boolean(editing);
+
   const amount = el('input', {
     type: 'text', inputMode: 'decimal', placeholder: '0,00', autocomplete: 'off', class: 'amount-input', 'aria-label': 'Importe',
     value: editing ? centsToInput(editing.originalMinor, exp()) : draft?.amount ?? '',
@@ -1021,6 +1164,8 @@ async function expenseFormView(groupId, expenseId, query) {
     };
     amount.value = reformat(amount.value);
     for (const [personId, text] of exactInputs) exactInputs.set(personId, text.trim() ? reformat(text) : text);
+    for (const [personId, text] of payerInputs) payerInputs.set(personId, text.trim() ? reformat(text) : text);
+    renderPayers();
     cardInput.value = '';
     rateInput.value = '';
     fxSource = 'ecb';
@@ -1036,6 +1181,56 @@ async function expenseFormView(groupId, expenseId, query) {
     value: editing?.fxSource === 'card' ? centsToInput(editing.amountCents, baseExp) : '',
   });
   const fxBox = el('div', { class: 'card stack fx-box' });
+  const payersBox = el('div', { class: 'card stack payers-box' });
+  const payersStatus = el('p', { class: 'exact-status', role: 'status' });
+
+  function currentPayers() {
+    const entries = [];
+    for (const member of members) {
+      const value = payerInputs.get(member.id).trim();
+      if (!value) continue;
+      const parsed = parseAmount(value, exp());
+      if (parsed === null) return { error: `Importe no válido para ${member.name}.` };
+      if (parsed > 0) entries.push({ personId: member.id, value: parsed });
+    }
+    return entries.length ? { entries } : { error: 'Escribe cuánto puso al menos una persona.' };
+  }
+
+  function updatePayersStatus() {
+    payersStatus.textContent = '';
+    payersStatus.className = 'exact-status';
+    if (!multiPayers) return;
+    const original = originalTotal();
+    const paid = (currentPayers().entries || []).reduce((sum, entry) => sum + entry.value, 0);
+    if (!original) return;
+    const diff = original - paid;
+    payersStatus.textContent = diff === 0
+      ? `Pagado ${formatMoney(paid, currency)} de ${formatMoney(original, currency)} ✓`
+      : `Pagado ${formatMoney(paid, currency)} de ${formatMoney(original, currency)} · ${diff > 0 ? 'faltan' : 'sobran'} ${formatMoney(Math.abs(diff), currency)}`;
+    payersStatus.classList.add(diff === 0 ? 'ok' : 'pending');
+  }
+
+  function renderPayers() {
+    payersBox.hidden = !multiPayers;
+    payersBox.replaceChildren();
+    if (!multiPayers) return;
+    payersBox.append(
+      el('span', { class: 'field-label', text: `Cuánto puso cada uno (${currencySymbol(currency)})` }),
+      el('div', { class: 'list' },
+        members.map((member) => {
+          const input = el('input', {
+            type: 'text', inputMode: 'decimal', autocomplete: 'off', class: 'share-input',
+            placeholder: exp() === 0 ? '0' : '0,00', value: payerInputs.get(member.id), 'aria-label': `Lo que pagó ${member.name}`,
+            onInput: () => {
+              payerInputs.set(member.id, input.value);
+              updatePayersStatus();
+            },
+          });
+          return el('label', { class: 'row static' }, avatar(member.id, member.name), el('span', { class: 'row-main', text: memberLabel(member) }), input);
+        })),
+      payersStatus);
+    updatePayersStatus();
+  }
   const fxHint = el('span', { class: 'field-hint' });
   const fxUnit = el('span', { class: 'fx-unit' });
   const converted = el('strong', { class: 'converted' });
@@ -1311,21 +1506,53 @@ async function expenseFormView(groupId, expenseId, query) {
   amount.addEventListener('input', () => {
     updateConverted();
     updatePreview();
+    updatePayersStatus();
   });
 
   // Fila de chips: grupo (al crear), quién pagó y fecha.
+  // Quién pagó: una persona o "Varias personas" (con lo que puso cada una, en la moneda del gasto).
   const payerChip = pickerChip({
-    leading: avatar(payerId, people.get(payerId)?.name),
+    leading: multiPayers ? icon('users', { small: true }) : avatar(payerId, people.get(payerId)?.name),
     label: 'Pagó',
-    text: memberLabel(people.get(payerId)),
-    options: members.map((member) => [member.id, memberLabel(member)]),
-    value: payerId,
+    text: multiPayers ? 'Varias personas' : memberLabel(people.get(payerId)),
+    options: [...members.map((member) => [member.id, memberLabel(member)]), ['multi', 'Varias personas…']],
+    value: multiPayers ? 'multi' : payerId,
     ariaLabel: 'Quién pagó',
     onChange: (value, { setText, setLeading }) => {
-      payerId = Number(value);
-      setText(memberLabel(people.get(payerId)));
-      setLeading(avatar(payerId, people.get(payerId)?.name));
+      multiPayers = value === 'multi';
+      if (multiPayers) {
+        setText('Varias personas');
+        setLeading(icon('users', { small: true }));
+      } else {
+        payerId = Number(value);
+        setText(memberLabel(people.get(payerId)));
+        setLeading(avatar(payerId, people.get(payerId)?.name));
+      }
+      renderPayers();
     },
+  });
+
+  // Categoría: se sugiere sola por la descripción hasta que la persona elige una.
+  const categoryChip = pickerChip({
+    leading: categoryIcon(category, { small: true }),
+    label: 'Categoría',
+    text: category ? categoryOf(category).label : 'Sin categoría',
+    options: [['', 'Sin categoría'], ...CATEGORIES.map((item) => [item.key, item.label])],
+    value: category ?? '',
+    ariaLabel: 'Categoría',
+    onChange: (value, { setText, setLeading }) => {
+      category = value || null;
+      categoryTouched = true;
+      setText(category ? categoryOf(category).label : 'Sin categoría');
+      setLeading(categoryIcon(category, { small: true }));
+    },
+  });
+  description.addEventListener('input', () => {
+    if (categoryTouched) return;
+    const guess = guessCategory(description.value);
+    if (guess === category) return;
+    category = guess;
+    categoryChip.update({ value: category ?? '', text: category ? categoryOf(category).label : 'Sin categoría', leading: categoryIcon(category, { small: true }) });
   });
   const activeGroups = groupList?.groups.filter((group) => !group.archived) ?? [];
   const groupChip = activeGroups.length > 1 && pickerChip({
@@ -1356,7 +1583,19 @@ async function expenseFormView(groupId, expenseId, query) {
         const assigned = entries.reduce((sum, entry) => sum + entry.value, 0);
         if (assigned !== original) return toast(`Los importes suman ${formatMoney(assigned, currency)} y el gasto es de ${formatMoney(original, currency)}.`);
       }
-      const body = { id, description: description.value, payerId, spentOn: date.value, splitMode: mode, shares: entries, currency };
+      let payerEntries = null;
+      if (multiPayers) {
+        const result = currentPayers();
+        if (result.error) return toast(result.error);
+        const paidTotal = result.entries.reduce((sum, entry) => sum + entry.value, 0);
+        if (paidTotal !== original) return toast(`Lo que pagó cada uno suma ${formatMoney(paidTotal, currency)} y el gasto es de ${formatMoney(original, currency)}.`);
+        payerEntries = result.entries;
+      }
+      const body = { id, description: description.value, payerId, spentOn: date.value, splitMode: mode, shares: entries, currency, category };
+      if (payerEntries) {
+        body.payers = payerEntries;
+        body.payerId = payerEntries.reduce((best, entry) => (entry.value > best.value ? entry : best)).personId;
+      }
       if (currency === base) {
         body.amountCents = original;
       } else {
@@ -1381,6 +1620,7 @@ async function expenseFormView(groupId, expenseId, query) {
         }
         // Un gasto nuevo se guarda primero en el móvil: sin red se enviará solo más tarde.
         const total = baseTotal();
+        const payersDto = computePayers({ totalCents: total, originalTotal: original, entries: payerEntries ?? [{ personId: payerId, value: original }], seed: id });
         const result = await createWithOutbox({
           id,
           kind: 'expense',
@@ -1393,7 +1633,9 @@ async function expenseFormView(groupId, expenseId, query) {
             groupId: bundle.group.id,
             description: body.description.trim(),
             spentOn: body.spentOn,
-            payerId,
+            payerId: mainPayer(payersDto),
+            payers: payersDto,
+            category,
             amountCents: total,
             originalMinor: original,
             currency,
@@ -1417,7 +1659,8 @@ async function expenseFormView(groupId, expenseId, query) {
   },
   el('div', { class: 'amount-row' }, amount, currencyInput),
   description,
-  el('div', { class: 'chips' }, groupChip, payerChip, dateChip(date, () => refreshRate())),
+  el('div', { class: 'chips' }, groupChip, payerChip, dateChip(date, () => refreshRate()), categoryChip),
+  payersBox,
   fxBox,
   el('div', { class: 'field' },
     el('span', { class: 'field-label', text: 'Para quién' }),
@@ -1427,6 +1670,7 @@ async function expenseFormView(groupId, expenseId, query) {
     }, 'Cómo se reparte'),
     splitBody),
   status,
+  editing && authorLine(editing, people),
   editing && el('button', {
     type: 'button',
     class: 'btn danger-ghost block',
@@ -1454,11 +1698,218 @@ async function expenseFormView(groupId, expenseId, query) {
   mount(topbar({ title: editing ? 'Editar gasto' : 'Nuevo gasto', back: backHref }), form);
   renderFx();
   renderSplitBody();
+  renderPayers();
   // Gasto nuevo en moneda extranjera: se pide ya el tipo del día.
   if (!editing) {
     refreshRate();
     amount.focus();
   }
+}
+
+// "Añadido por Judit · editado por Xavi" al pie del formulario de edición.
+function authorLine(expense, people) {
+  const name = (id) => (id === session.person.id ? 'ti' : people.get(id)?.name);
+  const parts = [];
+  if (expense.createdBy && name(expense.createdBy)) parts.push(`Añadido por ${name(expense.createdBy)}`);
+  if (expense.updatedBy && name(expense.updatedBy)) parts.push(`editado por ${name(expense.updatedBy)}`);
+  return parts.length ? el('p', { class: 'muted small author-line', text: parts.join(' · ') }) : null;
+}
+
+// ---------- Actividad ----------
+
+const CHANGE_LABELS = { description: 'descripción', amount: 'importe', payers: 'quién pagó', date: 'fecha', split: 'reparto', category: 'categoría' };
+
+// Frase de un elemento de actividad, desde el punto de vista de quien la lee.
+function activityText(item) {
+  const meId = session.person.id;
+  const mine = item.actorId === meId;
+  const actor = mine ? 'Tú' : item.actorName ?? 'Alguien';
+  const verb = (third, second) => (mine ? second : third);
+  const data = item.data ?? {};
+  const name = (id, fallback) => (id === meId ? 'ti' : fallback ?? '¿?');
+  const desc = `«${data.description ?? '…'}»`;
+  switch (item.kind) {
+    case 'expense_created': return `${actor} ${verb('añadió', 'añadiste')} ${desc}`;
+    case 'expense_updated': {
+      const changes = (data.changes ?? []).map((key) => CHANGE_LABELS[key]).filter(Boolean);
+      return `${actor} ${verb('editó', 'editaste')} ${desc}${changes.length ? ` (${changes.join(', ')})` : ''}`;
+    }
+    case 'expense_deleted': return `${actor} ${verb('borró', 'borraste')} ${desc}`;
+    case 'expense_restored': return `${actor} ${verb('recuperó', 'recuperaste')} ${desc}`;
+    case 'settlement_created':
+      if (data.toId === meId) return `${data.fromName} te pagó`;
+      if (data.fromId === meId) return `Pagaste a ${data.toName}`;
+      return `${data.fromName} pagó a ${data.toName}`;
+    case 'settlement_deleted': return `${actor} ${verb('borró', 'borraste')} un pago de ${name(data.fromId, data.fromName)} a ${name(data.toId, data.toName)}`;
+    case 'settlement_restored': return `${actor} ${verb('recuperó', 'recuperaste')} un pago de ${name(data.fromId, data.fromName)} a ${name(data.toId, data.toName)}`;
+    case 'member_added': return `${actor} ${verb('añadió', 'añadiste')} a ${data.name} al grupo`;
+    case 'member_removed': return `${actor} ${verb('quitó', 'quitaste')} a ${data.name} del grupo`;
+    case 'group_created': return `${actor} ${verb('creó', 'creaste')} el grupo`;
+    case 'group_renamed': return `${actor} ${verb('cambió', 'cambiaste')} el nombre a «${data.title}»`;
+    case 'group_currency': return `${actor} ${verb('cambió', 'cambiaste')} la moneda a ${data.currency}`;
+    case 'group_default_split': return `${actor} ${verb('cambió', 'cambiaste')} el reparto por defecto`;
+    case 'group_archived': return `${actor} ${verb('archivó', 'archivaste')} el grupo`;
+    case 'group_unarchived': return `${actor} ${verb('desarchivó', 'desarchivaste')} el grupo`;
+    default: return `${actor} ${verb('hizo un cambio', 'hiciste un cambio')}`;
+  }
+}
+
+function activityAmount(item) {
+  const data = item.data ?? {};
+  if (item.kind.startsWith('expense_')) {
+    return data.originalCurrency && data.originalCurrency !== data.currency
+      ? formatMoney(data.originalMinor, data.originalCurrency)
+      : formatMoney(data.amountCents ?? 0, data.currency ?? item.groupCurrency);
+  }
+  if (item.kind.startsWith('settlement_')) return formatMoney(data.amountCents ?? 0, data.currency ?? item.groupCurrency);
+  return null;
+}
+
+const timeFormat = new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' });
+
+function activityRow(item, lastSeenId) {
+  const unread = item.id > lastSeenId && item.actorId !== session.person.id;
+  const when = new Date(`${item.createdAt.replace(' ', 'T')}Z`);
+  const amountText = activityAmount(item);
+  const isExpense = item.kind.startsWith('expense_') && item.kind !== 'expense_deleted';
+  const href = isExpense ? `#/g/${item.groupId}/gasto/${item.subjectId}` : `#/g/${item.groupId}`;
+  return el('a', { class: `row activity-row${unread ? ' unread' : ''}`, href },
+    item.actorId ? avatar(item.actorId, item.actorName) : groupIcon(item.groupEmoji),
+    el('span', { class: 'row-main' },
+      el('strong', { class: 'wrap', text: activityText(item) }),
+      el('span', { class: 'meta', text: `${item.groupTitle} · ${timeFormat.format(when)}` })),
+    amountText && el('span', { class: 'row-side' }, el('strong', { text: amountText })),
+    unread && el('span', { class: 'unread-dot', 'aria-label': 'Nuevo' }));
+}
+
+async function activityView() {
+  const first = await api('activity');
+  const lastSeenId = first.lastSeenId;
+  const list = el('div', { class: 'stack' });
+  let currentDay = null;
+  let dayCard = null;
+  const append = (items) => {
+    for (const item of items) {
+      const day = new Date(`${item.createdAt.replace(' ', 'T')}Z`);
+      const iso = new Date(day.getTime() - day.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+      if (iso !== currentDay) {
+        currentDay = iso;
+        dayCard = el('div', { class: 'card list' });
+        list.append(el('h3', { class: 'day', text: formatDay(iso) }), dayCard);
+      }
+      dayCard.append(activityRow(item, lastSeenId));
+    }
+  };
+  append(first.items);
+
+  let nextBefore = first.nextBefore;
+  const more = el('button', {
+    type: 'button',
+    class: 'btn secondary block',
+    text: 'Ver más',
+    hidden: !nextBefore,
+    onClick: async () => {
+      more.disabled = true;
+      try {
+        const page = await api(`activity?before=${nextBefore}`);
+        append(page.items);
+        nextBefore = page.nextBefore;
+        more.hidden = !nextBefore;
+      } catch (error) {
+        handleError(error);
+      } finally {
+        more.disabled = false;
+      }
+    },
+  });
+
+  mount(
+    topbar({ title: 'Actividad', back: '#/' }),
+    el('section', { class: 'content' },
+      pushCard(),
+      first.items.length ? list : el('div', { class: 'card empty' }, el('p', { text: 'Todavía no hay actividad.' })),
+      more));
+
+  // Lo que se ha mostrado ya no es novedad.
+  if (first.items.length && first.items[0].id > lastSeenId) {
+    api('activity/seen', { method: 'POST', body: { lastId: first.items[0].id } }).catch(() => {});
+  }
+}
+
+// ---------- Avisos push ----------
+
+function pushSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+function base64UrlToBytes(value) {
+  const padded = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (value.length % 4)) % 4);
+  return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+}
+
+// El service worker puede no estar listo (o no existir en este navegador): no se espera para siempre.
+function swRegistration() {
+  return Promise.race([navigator.serviceWorker.ready, new Promise((resolve) => { window.setTimeout(() => resolve(null), 3000); })]);
+}
+
+function pushCard() {
+  const statusText = el('span', { class: 'muted small block', text: 'Comprobando…' });
+  const toggle = el('input', { type: 'checkbox', class: 'switch', disabled: true, 'aria-label': 'Avisos en este móvil' });
+  const card = el('label', { class: 'card switch-row' },
+    el('span', {}, el('strong', { text: 'Avisos en este móvil' }), statusText),
+    toggle);
+
+  const isIos = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+  (async () => {
+    if (!pushSupported()) {
+      statusText.textContent = isIos && !standalone
+        ? 'En iPhone, primero añade Repartos a la pantalla de inicio (Compartir → Añadir a pantalla de inicio).'
+        : 'Este navegador no permite avisos.';
+      return;
+    }
+    const registration = await swRegistration();
+    if (!registration) {
+      statusText.textContent = 'Los avisos no están disponibles en este navegador.';
+      return;
+    }
+    let subscription = await registration.pushManager.getSubscription();
+    const describe = () => {
+      if (Notification.permission === 'denied') statusText.textContent = 'Bloqueados en los ajustes del navegador para esta web.';
+      else statusText.textContent = subscription ? 'Te avisaremos cuando alguien añada o cambie gastos.' : 'Recibe un aviso cuando alguien apunte un gasto o un pago.';
+    };
+    toggle.checked = Boolean(subscription);
+    toggle.disabled = Notification.permission === 'denied';
+    describe();
+
+    toggle.addEventListener('change', async () => {
+      toggle.disabled = true;
+      try {
+        if (toggle.checked) {
+          const permission = await Notification.requestPermission();
+          if (permission !== 'granted') throw new Error('Sin permiso para mostrar avisos.');
+          const { publicKey } = await api('push/key');
+          subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(publicKey) });
+          await api('push/subscriptions', { method: 'POST', body: { subscription: subscription.toJSON() } });
+          toast('Avisos activados en este móvil');
+        } else if (subscription) {
+          const { endpoint } = subscription;
+          await subscription.unsubscribe();
+          subscription = null;
+          await api('push/subscriptions', { method: 'DELETE', body: { endpoint } }).catch(() => {});
+          toast('Avisos desactivados');
+        }
+      } catch (error) {
+        toggle.checked = Boolean(subscription);
+        handleError(error);
+      } finally {
+        toggle.disabled = Notification.permission === 'denied';
+        describe();
+      }
+    });
+  })();
+  return card;
 }
 
 // "Añadir gasto" desde el inicio: abre el formulario en el último grupo usado.
@@ -1785,9 +2236,9 @@ async function sharedView(token) {
   const tabs = el('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Secciones' });
   const show = (which) => {
     tabs.querySelectorAll('button').forEach((button) => button.setAttribute('aria-checked', String(button.dataset.tab === which)));
-    panel.replaceChildren(which === 'saldos' ? balancesPanel(bundle, people) : timeline(bundle, people));
+    panel.replaceChildren(which === 'saldos' ? balancesPanel(bundle, people) : which === 'resumen' ? summaryPanel(bundle, people) : timeline(bundle, people));
   };
-  for (const [value, label] of [['saldos', 'Saldos'], ['gastos', 'Gastos']]) {
+  for (const [value, label] of [['saldos', 'Saldos'], ['gastos', 'Gastos'], ['resumen', 'Resumen']]) {
     tabs.append(el('button', { type: 'button', role: 'radio', 'data-tab': value, text: label, onClick: () => show(value) }));
   }
   mount(
@@ -1873,6 +2324,8 @@ const ROUTES = [
   [/^\/nuevo-grupo$/, () => newGroupView()],
   [/^\/g\/(\d+)$/, ([id]) => groupView(id, 'gastos')],
   [/^\/g\/(\d+)\/saldos$/, ([id]) => groupView(id, 'saldos')],
+  [/^\/g\/(\d+)\/resumen$/, ([id]) => groupView(id, 'resumen')],
+  [/^\/actividad$/, () => activityView()],
   [/^\/gasto$/, () => quickExpenseView()],
   [/^\/g\/(\d+)\/gasto$/, ([id], query) => expenseFormView(id, null, query)],
   [/^\/g\/(\d+)\/gasto\/([\w-]+)$/, ([id, expenseId], query) => expenseFormView(id, expenseId, query)],

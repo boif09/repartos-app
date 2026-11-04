@@ -2,7 +2,7 @@
 // - Archivos de la app: caché primero y se actualizan en segundo plano.
 // - Lecturas de la API: red primero; sin red, la última respuesta guardada (marcada como offline).
 // - Escrituras, enlaces de amigos y redirecciones de Authelia: nunca se guardan.
-const CACHE = 'repartos-v6';
+const CACHE = 'repartos-v7';
 const SHELL = [
   './',
   'app.js',
@@ -15,6 +15,7 @@ const SHELL = [
   'shared/balances.js',
   'shared/settle.js',
   'shared/pending.js',
+  'shared/categories.js',
   'outbox.js',
   'icons/icon-192.png',
   'fonts/ibm-plex-sans-latin-400-normal.woff2',
@@ -78,6 +79,36 @@ async function fromCacheThenUpdate(request, event) {
   }
   return update;
 }
+
+// Avisos push: el servidor manda { title, body, url, tag } cifrado; aquí solo se muestra.
+self.addEventListener('push', (event) => {
+  let message = { title: 'Repartos', body: 'Hay novedades en tus grupos.', url: './' };
+  try {
+    message = { ...message, ...event.data.json() };
+  } catch { /* aviso sin contenido: se muestra el genérico */ }
+  event.waitUntil(self.registration.showNotification(message.title, {
+    body: message.body,
+    icon: 'icons/icon-192.png',
+    tag: message.tag,
+    renotify: Boolean(message.tag),
+    data: { url: message.url },
+  }));
+});
+
+// Al tocar el aviso: se abre la app (o la ventana que ya estaba abierta) en el grupo.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || './', self.registration.scope).href;
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windows) {
+      if (!inScope(new URL(client.url))) continue;
+      await client.navigate(target).catch(() => {});
+      return client.focus();
+    }
+    return self.clients.openWindow(target);
+  })());
+});
 
 // La app avisa cuando cambia el usuario: se borran los datos de la API de la persona anterior.
 self.addEventListener('message', (event) => {

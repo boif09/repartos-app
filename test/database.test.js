@@ -10,7 +10,8 @@ function tableNames(db) {
 test('las migraciones crean el esquema y fijan user_version', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   assert.deepEqual(tableNames(db), [
-    'expense_groups', 'expense_shares', 'expenses', 'fx_cache', 'group_members', 'people', 'settlements',
+    'activity', 'activity_seen', 'app_settings', 'expense_groups', 'expense_payers', 'expense_shares', 'expenses',
+    'fx_cache', 'group_members', 'people', 'push_subscriptions', 'settlements',
   ]);
   assert.ok(db.prepare('PRAGMA table_info(fx_cache)').all().some((column) => column.name === 'published_on'));
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS.at(-1).version);

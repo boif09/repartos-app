@@ -1,7 +1,7 @@
 // Gastos y pagos guardados en el móvil sin conexión, pendientes de enviar.
 // Se muestran mezclados con los del servidor y ya cuentan en los saldos que ve la persona.
 // Los que el servidor rechazó (item.error) se enseñan, pero no cuentan.
-import { computeBalances, pairwiseDebts } from './balances.js';
+import { computeBalances, pairwiseDebts, payersOf } from './balances.js';
 import { settle } from './settle.js';
 
 const counts = (item) => !item.error;
@@ -25,7 +25,7 @@ export function mergePending(bundle, items, meId) {
 
   const expenses = [...newExpenses, ...bundle.expenses];
   const settlements = [...newSettlements, ...bundle.settlements];
-  const forBalance = expenses.filter(counts).map((expense) => ({ payerId: expense.payerId, baseCents: expense.amountCents, shares: expense.shares }));
+  const forBalance = expenses.filter(counts).map((expense) => ({ payerId: expense.payerId, baseCents: expense.amountCents, shares: expense.shares, payers: expense.payers }));
   const settlementsForBalance = settlements.filter(counts);
   const balances = computeBalances(bundle.members.map((member) => member.id), forBalance, settlementsForBalance);
   const transfers = bundle.group.simplifyDebts ? settle(balances) : pairwiseDebts(forBalance, settlementsForBalance);
@@ -48,7 +48,7 @@ export function pendingDelta(items, groupId, meId, baseCurrency) {
     if (baseCurrency && item.baseCurrency && item.baseCurrency !== baseCurrency) continue;
     if (item.kind === 'expense') {
       const { expense } = item;
-      if (expense.payerId === meId) delta += expense.amountCents;
+      delta += payersOf({ ...expense, baseCents: expense.amountCents }).find((payer) => payer.personId === meId)?.paidCents ?? 0;
       delta -= expense.shares.find((share) => share.personId === meId)?.owedCents ?? 0;
     } else {
       const { settlement } = item;
