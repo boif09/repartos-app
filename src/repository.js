@@ -5,6 +5,7 @@ import { convertMinor, parseRate } from '../shared/fx.js';
 import { isPushEndpoint } from './push.js';
 import { computePayers, computeShares, mainPayer, SplitError, SPLIT_MODES } from '../shared/splits.js';
 import { CATEGORY_KEYS } from '../shared/categories.js';
+import { GROUP_COLOR_KEYS } from '../shared/palette.js';
 import { computeBalances, pairwiseDebts } from '../shared/balances.js';
 import { settle } from '../shared/settle.js';
 
@@ -64,6 +65,12 @@ function emoji(value) {
   return cleaned;
 }
 
+function groupColorKey(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (!GROUP_COLOR_KEYS.includes(value)) throw badRequest('Color de grupo no válido.');
+  return value;
+}
+
 function capitalize(value) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -76,6 +83,7 @@ const toGroup = (row) => ({
   id: row.id,
   title: row.title,
   emoji: row.emoji ?? null,
+  color: row.color ?? null,
   baseCurrency: row.base_currency,
   simplifyDebts: row.simplify_debts === 1,
   defaultSplit: parseDefaultSplit(row.default_split),
@@ -158,6 +166,7 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
       groupId: row.group_id,
       groupTitle: row.group_title,
       groupEmoji: row.group_emoji ?? null,
+      groupColor: row.group_color ?? null,
       groupCurrency: row.group_currency,
       actorId: row.actor_id ?? null,
       actorName: row.actor_name ?? null,
@@ -173,7 +182,7 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
     const max = Math.min(Math.max(Number(limit) || ACTIVITY_PAGE, 1), 100);
     const cursor = Number(before) > 0 ? Number(before) : Number.MAX_SAFE_INTEGER;
     const rows = db.prepare(`
-      SELECT a.*, g.title AS group_title, g.emoji AS group_emoji, g.base_currency AS group_currency, p.name AS actor_name
+      SELECT a.*, g.title AS group_title, g.emoji AS group_emoji, g.color AS group_color, g.base_currency AS group_currency, p.name AS actor_name
       FROM activity a
       JOIN group_members gm ON gm.group_id = a.group_id AND gm.person_id = ?
       JOIN expense_groups g ON g.id = a.group_id
@@ -485,11 +494,12 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
   function createGroup(body, meId) {
     const title = text(body?.title, 'el título', { max: 60 });
     const groupEmoji = emoji(body?.emoji);
+    const color = groupColorKey(body?.color);
     const baseCurrency = body?.baseCurrency === undefined ? 'EUR' : currencyCode(body.baseCurrency, 'La moneda del grupo');
     const members = Array.isArray(body?.members) ? body.members : [];
     if (members.length > 50) throw badRequest('Demasiadas personas en el grupo.');
     return transaction(() => {
-      const result = db.prepare('INSERT INTO expense_groups (title, emoji, base_currency) VALUES (?, ?, ?)').run(title, groupEmoji, baseCurrency);
+      const result = db.prepare('INSERT INTO expense_groups (title, emoji, color, base_currency) VALUES (?, ?, ?, ?)').run(title, groupEmoji, color, baseCurrency);
       const groupId = Number(result.lastInsertRowid);
       addMemberRow(groupId, meId);
       for (const member of members) addMemberRow(groupId, resolveMemberInput(member));
@@ -514,6 +524,9 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
       }
       if (body?.emoji !== undefined) {
         db.prepare('UPDATE expense_groups SET emoji = ? WHERE id = ?').run(emoji(body.emoji), row.id);
+      }
+      if (body?.color !== undefined) {
+        db.prepare('UPDATE expense_groups SET color = ? WHERE id = ?').run(groupColorKey(body.color), row.id);
       }
       if (body?.simplifyDebts !== undefined) {
         db.prepare('UPDATE expense_groups SET simplify_debts = ? WHERE id = ?').run(body.simplifyDebts ? 1 : 0, row.id);

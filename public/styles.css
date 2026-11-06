@@ -22,6 +22,12 @@
   --accent: #2b3fd6;
   --accent-text: #ffffff;
   --accent-soft: #e9ecfd;
+  /* Color de grupo (--g, se fija por grupo): tono suave para fondos e intenso para iconos. */
+  --g: #2b3fd6;
+  --tint-soft: 13%;
+  --tint-ink: 85%;
+  --tint-base: #000000;
+  --tab-active: #ffffff;
   --positive: #0b7a4b;
   --negative: #c03a1f;
   --danger: #c03a1f;
@@ -62,6 +68,11 @@
     --accent: #8e9bff;
     --accent-text: #0d0f12;
     --accent-soft: #232a5c;
+    --g: #4c57c8;
+    --tint-soft: 30%;
+    --tint-ink: 38%;
+    --tint-base: #ffffff;
+    --tab-active: #323844;
     --positive: #4fc48c;
     --negative: #ff7f61;
     --danger: #ff7f61;
@@ -85,6 +96,11 @@
   --accent: #8e9bff;
   --accent-text: #0d0f12;
   --accent-soft: #232a5c;
+  --g: #4c57c8;
+  --tint-soft: 30%;
+  --tint-ink: 38%;
+  --tint-base: #ffffff;
+  --tab-active: #323844;
   --positive: #4fc48c;
   --negative: #ff7f61;
   --danger: #ff7f61;
@@ -638,7 +654,7 @@ input:focus { border-color: var(--accent); }
 .group-icon.small-icon { width: 32px; height: 32px; border-radius: var(--r-sm); }
 .category-row .row-main { gap: 6px; }
 .bar { display: block; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
-.bar span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.bar span { display: block; height: 100%; border-radius: 3px; background: color-mix(in srgb, var(--g) var(--tint-ink), var(--tint-base)); }
 
 .payers-box[hidden] { display: none; }
 .payers-box { gap: 8px; padding: 12px 16px; }
@@ -767,3 +783,125 @@ dialog.sheet[open] { animation: sheet-in .18s ease-out; }
   text-underline-offset: 3px;
   cursor: pointer;
 }
+
+/* ==========================================================================
+   Color de grupo (diseño C): cada grupo tiene su color (shared/palette.js), que llega como --g.
+   Los tonos de la paleta dan ≥ 4,5:1 con texto blanco; los tintes se calculan con color-mix
+   para que funcionen igual en claro y en oscuro.
+   ========================================================================== */
+
+.group-icon.tinted, .cat-tile {
+  background: color-mix(in srgb, var(--g) var(--tint-soft), var(--surface));
+  color: color-mix(in srgb, var(--g) var(--tint-ink), var(--tint-base));
+}
+.cat-tile {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: var(--r-md);
+}
+.cat-tile.small { width: 32px; height: 32px; border-radius: var(--r-sm); }
+
+/* Inicio: tarjetas de grupo */
+.group-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.group-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 132px;
+  padding: 14px;
+  border-radius: 20px;
+  background: var(--g);
+  color: #fff;
+  transition: transform .12s ease;
+}
+.group-tile:active { transform: scale(.98); }
+.group-tile.featured { grid-column: span 2; min-height: 148px; }
+.tile-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.tile-top .icon { width: 26px; height: 26px; }
+.tile-count { font-size: var(--fs-xs); color: rgb(255 255 255 / 85%); }
+.tile-bottom { display: grid; gap: 2px; min-width: 0; }
+.tile-title { font-size: var(--fs-md); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-balance { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; font-size: var(--fs-sm); color: rgb(255 255 255 / 88%); }
+.tile-balance .num { color: #fff; font-weight: 600; }
+.group-tile.featured .tile-title { font-size: var(--fs-lg); }
+.group-tile.featured .tile-balance { display: grid; }
+.group-tile.featured .tile-balance .num { font-size: var(--fs-xl); font-weight: 500; }
+.group-tile.new {
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: transparent;
+  border: 1.5px dashed var(--control);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* Vista de grupo: barra superior y cabecera del color del grupo */
+.topbar.tinted { background: var(--g); color: #fff; border-bottom: 0; backdrop-filter: none; }
+.topbar.tinted .icon-btn { color: #fff; }
+.topbar.tinted .icon-btn:active { background: rgb(255 255 255 / 16%); }
+.topbar.tinted h1 { display: flex; align-items: center; gap: 8px; }
+.topbar.tinted h1 .icon { flex: none; }
+
+.group-header {
+  display: grid;
+  gap: 2px;
+  margin: -16px -16px 0;
+  padding: 2px 20px 18px;
+  border-radius: 0 0 26px 26px;
+  background: var(--g);
+  color: #fff;
+}
+.gh-label { font-size: var(--fs-sm); color: rgb(255 255 255 / 88%); }
+.gh-amount { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: var(--fs-2xl); font-weight: 500; letter-spacing: -.03em; line-height: 1.15; }
+
+.scale { display: grid; gap: 6px; margin-top: 12px; }
+.scale-row { display: grid; grid-template-columns: minmax(0, 64px) 1fr auto; align-items: center; gap: 10px; font-size: var(--fs-sm); }
+.scale-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scale-track { display: grid; grid-template-columns: 1fr 2px 1fr; height: 18px; }
+.scale-axis { background: rgb(255 255 255 / 70%); border-radius: 1px; }
+.scale-neg, .scale-pos { display: flex; }
+.scale-neg { justify-content: flex-end; }
+.scale-neg span { height: 100%; border-radius: 6px 0 0 6px; background: rgb(255 255 255 / 38%); }
+.scale-pos span { height: 100%; border-radius: 0 6px 6px 0; background: #fff; }
+.scale-amount { min-width: 72px; text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 500; }
+.scale-more { font-size: var(--fs-xs); color: rgb(255 255 255 / 85%); }
+
+.gh-actions { display: flex; gap: 8px; margin-top: 14px; }
+.gh-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: var(--r-md);
+  background: rgb(255 255 255 / 18%);
+  color: #fff;
+  font-weight: 600;
+}
+.gh-btn.primary { flex: 1.4; background: #fff; color: var(--g); }
+.gh-btn:active { transform: translateY(1px); }
+.group-header a:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+.fab.tinted { background: var(--g); color: #fff; }
+
+/* Pestañas como selector suave (sin borde) */
+.tabs { border: 0; padding: 3px; gap: 3px; background: var(--surface-2); border-radius: var(--r-md); }
+.tabs .tab { min-height: 38px; border-radius: 9px; }
+.tabs .tab + .tab { border-left: 0; }
+.tabs .tab.active { background: var(--tab-active); color: var(--text); box-shadow: 0 1px 3px rgb(0 0 0 / 12%); }
+
+/* Lo que supone cada gasto para ti, como etiqueta */
+.row-side .impact { padding: 1px 6px; border-radius: 6px; }
+.row-side .impact.positive { background: color-mix(in srgb, var(--positive) 13%, transparent); }
+.row-side .impact.negative { background: color-mix(in srgb, var(--negative) 13%, transparent); }
+
+/* Selector de color en ajustes */
+.chip.color-chip { width: 44px; height: 44px; padding: 0; justify-content: center; border-radius: 50%; }
+.chip.color-chip .swatch { width: 28px; height: 28px; border-radius: 50%; }
+.chip.color-chip[aria-checked="true"] { background: var(--surface); border-color: var(--text); border-width: 2px; }

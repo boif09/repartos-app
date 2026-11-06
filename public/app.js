@@ -8,6 +8,7 @@ import { listItems, outboxAvailable, putItem, removeItem } from './outbox.js';
 import { computePayers, computeShares, mainPayer, SplitError } from './shared/splits.js';
 import { payersOf } from './shared/balances.js';
 import { CATEGORIES, categoryOf, guessCategory } from './shared/categories.js';
+import { GROUP_COLORS, groupColor } from './shared/palette.js';
 
 const appEl = document.getElementById('app');
 const GROUP_EMOJIS = ['👥', '❤️', '🏠', '✈️', '🏖️', '⛰️', '🍻', '🎉'];
@@ -344,9 +345,25 @@ const GROUP_ICONS = [
   ['🎉', 'party', 'Celebración'],
 ];
 
-function groupIcon(emoji) {
-  const name = GROUP_ICONS.find(([value]) => value === emoji)?.[1] ?? 'users';
-  return el('span', { class: 'group-icon', 'aria-hidden': 'true' }, icon(name));
+function groupIconName(group) {
+  return GROUP_ICONS.find(([value]) => value === group?.emoji)?.[1] ?? 'users';
+}
+
+// El color del grupo viaja como variable CSS (--g): lo usan la cabecera, las tarjetas y los iconos.
+function tintWith(node, group) {
+  node.style.setProperty('--g', groupColor(group).hex);
+  return node;
+}
+
+function groupIcon(group) {
+  return tintWith(el('span', { class: 'group-icon tinted', 'aria-hidden': 'true' }, icon(groupIconName(group))), group);
+}
+
+// Icono de la categoría del gasto, teñido con el color del grupo que lo contiene.
+// Sin categoría guardada (gastos antiguos), la que sugiere la descripción.
+function categoryTile(expense, { small = false } = {}) {
+  const key = expense.category || guessCategory(expense.description) || 'other';
+  return el('span', { class: small ? 'cat-tile small' : 'cat-tile', 'aria-hidden': 'true' }, icon(categoryOf(key).icon, { small }));
 }
 
 // Color fijo por persona (texto blanco ≥ 5:1 en todos): se reconoce quién pagó sin leer.
@@ -465,6 +482,22 @@ function emojiPicker(current, onPick) {
     })));
 }
 
+function colorPicker(current, onPick) {
+  return el('div', { class: 'chips', role: 'radiogroup', 'aria-label': 'Color del grupo' },
+    GROUP_COLORS.map((color) => {
+      const swatch = el('span', { class: 'swatch' });
+      swatch.style.background = color.hex;
+      return chip({
+        label: swatch,
+        ariaLabel: color.label,
+        className: 'chip color-chip',
+        selected: color.key === current,
+        role: 'radio',
+        onToggle: () => onPick(color.key),
+      });
+    }));
+}
+
 // Confirmación propia (hoja inferior) en lugar del diálogo gris del navegador.
 // <dialog> nativo: atrapa el foco, se cierra con Escape y empieza enfocado en "Cancelar".
 function confirmSheet({ title, message, confirmLabel, danger = false }) {
@@ -572,10 +605,26 @@ async function groupsView() {
             el('strong', { class: `big ${cents > 0 ? 'positive' : 'negative'}`, text: formatMoney(Math.abs(cents), currency) })))
           : [el('span', { class: 'label', text: 'En todos tus grupos' }), el('strong', { class: 'big muted', text: 'Estás en paz' })])));
 
+  // Cada grupo es una tarjeta de su color. Si el número de tarjetas (con "Nuevo") es impar,
+  // la primera ocupa todo el ancho para que la cuadrícula quede completa.
+  const featured = active.length > 0 && (active.length + 1) % 2 === 1;
+  const tile = (group, index) => {
+    const balance = balanceText(group.myBalanceCents, group.baseCurrency);
+    return tintWith(el('a', { class: featured && index === 0 ? 'group-tile featured' : 'group-tile', href: `#/g/${group.id}` },
+      el('span', { class: 'tile-top' },
+        icon(groupIconName(group)),
+        el('span', { class: 'tile-count', text: plural(group.memberCount, 'persona', 'personas') })),
+      el('span', { class: 'tile-bottom' },
+        el('strong', { class: 'tile-title', text: group.title }),
+        el('span', { class: 'tile-balance' },
+          el('span', { text: balance.label }),
+          balance.amount && el('span', { class: 'num', text: balance.amount })))), group);
+  };
+
   const row = (group) => {
     const balance = balanceText(group.myBalanceCents, group.baseCurrency);
     return el('a', { class: 'row group-row', href: `#/g/${group.id}` },
-      groupIcon(group.emoji),
+      groupIcon(group),
       el('span', { class: 'row-main' },
         el('strong', { text: group.title }),
         el('span', { class: 'meta', text: `${plural(group.memberCount, 'persona', 'personas')} · ${plural(group.expenseCount, 'gasto', 'gastos')}` })),
@@ -595,7 +644,9 @@ async function groupsView() {
     el('section', { class: 'content' },
       summary,
       active.length
-        ? el('div', { class: 'card list' }, active.map(row))
+        ? el('div', { class: 'group-grid' },
+          active.map(tile),
+          el('a', { class: 'group-tile new', href: '#/nuevo-grupo' }, icon('plus'), el('span', { text: 'Nuevo grupo' })))
         : el('div', { class: 'card empty' },
           el('h2', { text: 'Aún no hay grupos' }),
           el('p', { text: 'Crea uno para la pareja, un viaje o un finde con amigos.' })),
@@ -603,7 +654,7 @@ async function groupsView() {
         el('summary', { text: `Archivados (${archived.length})` }),
         el('div', { class: 'card list' }, archived.map(row))),
       el('div', { class: 'home-links' },
-        el('a', { class: 'btn secondary', href: '#/nuevo-grupo' }, icon('plus', { small: true }), 'Nuevo grupo'),
+        !active.length && el('a', { class: 'btn secondary', href: '#/nuevo-grupo' }, icon('plus', { small: true }), 'Nuevo grupo'),
         el('a', { class: 'btn secondary', href: '#/personas' }, icon('users', { small: true }), 'Personas'))),
     active.length
       ? el('a', { class: 'fab', href: '#/gasto' }, icon('plus'), 'Añadir gasto')
@@ -611,9 +662,12 @@ async function groupsView() {
 }
 
 async function newGroupView() {
-  const { people } = await api('people');
+  const [{ people }, { groups }] = await Promise.all([api('people'), api('groups')]);
   const selected = new Map(); // key -> { personId } | { name }
   let emoji = GROUP_EMOJIS[0];
+  // Se propone un color que aún no use ningún grupo.
+  const used = new Set(groups.map((group) => groupColor(group).key));
+  let color = (GROUP_COLORS.find((option) => !used.has(option.key)) ?? GROUP_COLORS[groups.length % GROUP_COLORS.length]).key;
   let baseCurrency = 'EUR';
 
   const title = el('input', { type: 'text', maxLength: 60, required: true, placeholder: 'Pareja, Japón 2027, Finde Cerdanya…', autocomplete: 'off' });
@@ -664,7 +718,7 @@ async function newGroupView() {
       }
       submit.disabled = true;
       try {
-        const bundle = await api('groups', { method: 'POST', body: { title: title.value, emoji, baseCurrency, members: [...selected.values()] } });
+        const bundle = await api('groups', { method: 'POST', body: { title: title.value, emoji, color, baseCurrency, members: [...selected.values()] } });
         navigate(`#/g/${bundle.group.id}`, { replace: true });
       } catch (error) {
         handleError(error);
@@ -674,6 +728,7 @@ async function newGroupView() {
   },
   field('Nombre', title),
   field('Icono', emojiPicker(emoji, (value) => { emoji = value; })),
+  field('Color', colorPicker(color, (value) => { color = value; })),
   field('Moneda de las cuentas', currencySelect(baseCurrency, (value) => { baseCurrency = value; }),
     'Los saldos se calculan en esta moneda. En un viaje puedes dejar euros y apuntar cada gasto en la moneda local.'),
   el('div', { class: 'field' },
@@ -704,7 +759,7 @@ function timeline(bundle, people, { emptyText } = {}) {
   const meId = session?.person.id ?? null;
   const editable = !bundle.group.archived && !SHARED_MODE;
   const cur = bundle.group.baseCurrency;
-  const list = el('div', { class: 'stack timeline' });
+  const list = tintWith(el('div', { class: 'stack timeline' }), bundle.group);
   let currentDay = null;
   let dayCard = null;
   for (const item of items) {
@@ -734,16 +789,14 @@ function timeline(bundle, people, { emptyText } = {}) {
         class: 'row',
         href: editable ? `#/g/${bundle.group.id}/gasto/${expense.id}` : undefined,
       },
-      avatar(expense.payerId, people.get(expense.payerId)?.name),
+      categoryTile(expense),
       el('span', { class: 'row-main' },
         el('strong', { text: expense.description }),
-        el('span', { class: 'meta' },
-          expense.category && categoryIcon(expense.category, { small: true }),
-          `${payersText(expense, people, meId)} · ${splitSummary(expense, bundle.members.length)}`)),
+        el('span', { class: 'meta', text: `${payersText(expense, people, meId)} · ${splitSummary(expense, bundle.members.length)}` })),
       el('span', { class: 'row-side' },
         el('strong', { text: formatMoney(expense.originalMinor, expense.currency) }),
         expense.currency !== cur && el('span', { class: 'muted small num', text: `≈ ${formatMoney(expense.amountCents, cur)}` }),
-        impact && el('span', { class: `small ${impact.tone}`, text: impact.text }))));
+        impact && el('span', { class: `small impact ${impact.tone}`, text: impact.text }))));
     } else {
       const settlement = item.data;
       dayCard.append(el('button', {
@@ -814,8 +867,9 @@ function balancesPanel(bundle, people) {
     writable && el('a', { class: 'btn ghost block', href: `#/g/${groupId}/pago`, text: 'Registrar otro pago' }));
 }
 
-// "Judit te debe" en vez de "Te deben": en un grupo de dos se dice con quién, y saldar está a un toque.
-function balanceHero(bundle, tab) {
+// Cabecera del color del grupo: "Le debes a Judit 7,91 €", la balanza de saldos de cada persona
+// (a la derecha a quien le deben, a la izquierda quien debe) y saldar a un toque.
+function groupHeader(bundle, tab) {
   const meId = session.person.id;
   const cur = bundle.group.baseCurrency;
   const mine = bundle.myBalanceCents;
@@ -825,22 +879,49 @@ function balanceHero(bundle, tab) {
   if (mine === null) label = 'No participas en este grupo';
   else if (partner) label = mine > 0 ? `${partner.name} te debe` : mine < 0 ? `Le debes a ${partner.name}` : `Estás en paz con ${partner.name}`;
   else label = mine > 0 ? 'Te deben' : mine < 0 ? 'Debes' : 'Estás en paz';
-  const tone = mine > 0 ? 'positive' : mine < 0 ? 'negative' : 'muted';
   const settleUp = !bundle.group.archived && bundle.transfers.find((transfer) => transfer.fromId === meId || transfer.toId === meId);
   const base = `#/g/${bundle.group.id}`;
 
-  return el('div', { class: 'card hero' },
-    el('div', { class: 'hero-top' },
-      partner ? avatar(partner.id, partner.name, { large: true }) : groupIcon(bundle.group.emoji),
-      el('div', { class: 'hero-text' },
-        el('span', { class: 'label', text: label }),
-        el('strong', { class: `big ${tone}`, text: mine ? formatMoney(Math.abs(mine), cur) : 'Sin deudas' }))),
-    el('div', { class: 'hero-actions' },
+  const MAX_ROWS = 5;
+  const balances = [...bundle.balances].filter((item) => item.amountCents !== 0)
+    .sort((a, b) => b.amountCents - a.amountCents);
+  const shown = balances.length > MAX_ROWS
+    ? [...balances].sort((a, b) => Math.abs(b.amountCents) - Math.abs(a.amountCents)).slice(0, MAX_ROWS).sort((a, b) => b.amountCents - a.amountCents)
+    : balances;
+  const largest = Math.max(1, ...shown.map((item) => Math.abs(item.amountCents)));
+  const people = new Map(bundle.members.map((member) => [member.id, member]));
+  const fill = (cents) => {
+    const node = el('span');
+    node.style.width = `${Math.max(4, Math.round((Math.abs(cents) / largest) * 100))}%`;
+    return node;
+  };
+  const scale = shown.length > 0 && el('div', { class: 'scale', role: 'list', 'aria-label': 'Saldos del grupo' },
+    shown.map(({ personId, amountCents }) => {
+      const name = personId === meId ? 'Tú' : (people.get(personId)?.name ?? '¿?');
+      const amount = `${amountCents > 0 ? '+' : '−'}${formatMoney(Math.abs(amountCents), cur)}`;
+      return el('div', { class: 'scale-row', role: 'listitem', 'aria-label': `${name}: ${amountCents > 0 ? 'le deben' : 'debe'} ${formatMoney(Math.abs(amountCents), cur)}` },
+        el('span', { class: 'scale-name', 'aria-hidden': 'true', text: name }),
+        el('span', { class: 'scale-track', 'aria-hidden': 'true' },
+          el('span', { class: 'scale-neg' }, amountCents < 0 && fill(amountCents)),
+          el('span', { class: 'scale-axis' }),
+          el('span', { class: 'scale-pos' }, amountCents > 0 && fill(amountCents))),
+        el('span', { class: 'scale-amount', 'aria-hidden': 'true', text: amount }));
+    }),
+    balances.length > shown.length && el('span', { class: 'scale-more', text: `y ${plural(balances.length - shown.length, 'persona más', 'personas más')} en Saldos` }));
+
+  return tintWith(el('div', { class: 'group-header' },
+    el('span', { class: 'gh-label', text: label }),
+    el('strong', { class: 'gh-amount', text: mine ? formatMoney(Math.abs(mine), cur) : 'Sin deudas' }),
+    scale,
+    el('div', { class: 'gh-actions' },
       settleUp && el('a', {
+        class: 'gh-btn primary',
         href: `${base}/pago?from=${settleUp.fromId}&to=${settleUp.toId}&amount=${settleUp.amountCents}`,
-        text: 'Saldar cuentas',
+        text: `Saldar ${formatMoney(settleUp.amountCents, cur)}`,
       }),
-      tab === 'saldos' ? el('a', { href: base, text: 'Ver gastos' }) : el('a', { href: `${base}/saldos`, text: 'Ver saldos' })));
+      tab === 'saldos'
+        ? el('a', { class: 'gh-btn', href: base, text: 'Ver gastos' })
+        : el('a', { class: 'gh-btn', href: `${base}/saldos`, text: 'Ver saldos' }))), bundle.group);
 }
 
 // Buscador sobre la lista de gastos: por descripción, categoría o quién pagó.
@@ -898,7 +979,7 @@ function summaryPanel(bundle, people) {
   };
   const percent = (value) => `${Math.round((value / total) * 100)} %`;
 
-  return el('div', { class: 'stack' },
+  return tintWith(el('div', { class: 'stack' },
     el('div', { class: 'card summary' },
       el('span', { class: 'muted small', text: 'Gasto total' }),
       el('strong', { class: 'big', text: formatMoney(total, cur) }),
@@ -923,11 +1004,11 @@ function summaryPanel(bundle, people) {
     el('h2', { class: 'section-title', text: 'Por categoría' }),
     el('div', { class: 'card list' },
       [...byCategory].sort((a, b) => b[1] - a[1]).map(([key, value]) => el('div', { class: 'row static category-row' },
-        el('span', { class: 'group-icon small-icon', 'aria-hidden': 'true' }, categoryIcon(key, { small: true })),
+        el('span', { class: 'cat-tile small', 'aria-hidden': 'true' }, categoryIcon(key, { small: true })),
         el('span', { class: 'row-main' }, el('strong', { text: categoryOf(key).label }), bar(value)),
         el('span', { class: 'row-side' },
           el('strong', { class: 'amount', text: formatMoney(value, cur) }),
-          el('span', { class: 'small muted', text: percent(value) }))))));
+          el('span', { class: 'small muted', text: percent(value) })))))), bundle.group);
 }
 
 async function groupView(groupId, tab) {
@@ -937,22 +1018,25 @@ async function groupView(groupId, tab) {
   const people = new Map(bundle.members.map((person) => [person.id, person]));
   const base = `#/g/${groupId}`;
 
+  const bar = tintWith(topbar({
+    title: bundle.group.title,
+    back: '#/',
+    action: el('a', { class: 'icon-btn', href: `${base}/ajustes`, 'aria-label': 'Ajustes del grupo' }, icon('settings')),
+  }), bundle.group);
+  bar.classList.add('tinted');
+  bar.querySelector('h1').prepend(icon(groupIconName(bundle.group), { small: true }));
   mount(
-    topbar({
-      title: bundle.group.title,
-      back: '#/',
-      action: el('a', { class: 'icon-btn', href: `${base}/ajustes`, 'aria-label': 'Ajustes del grupo' }, icon('settings')),
-    }),
+    bar,
     el('section', { class: 'content' },
+      groupHeader(bundle, tab),
       bundle.group.archived && el('div', { class: 'banner', text: 'Grupo archivado: solo lectura.' }),
-      balanceHero(bundle, tab),
       el('nav', { class: 'tabs', 'aria-label': 'Secciones del grupo' },
         [['gastos', 'Gastos', base], ['saldos', 'Saldos', `${base}/saldos`], ['resumen', 'Resumen', `${base}/resumen`]].map(([key, label, href]) =>
           el('a', { href, class: tab === key ? 'tab active' : 'tab', 'aria-current': tab === key ? 'page' : undefined, text: label }))),
       tab === 'saldos' ? balancesPanel(bundle, people)
         : tab === 'resumen' ? summaryPanel(bundle, people)
           : searchableTimeline(bundle, people)),
-    !bundle.group.archived && el('a', { class: 'fab', href: `${base}/gasto` }, icon('plus'), 'Gasto'));
+    !bundle.group.archived && tintWith(el('a', { class: 'fab tinted', href: `${base}/gasto` }, icon('plus'), 'Gasto'), bundle.group));
 }
 
 const SPLIT_MODES_UI = [
@@ -1556,7 +1640,7 @@ async function expenseFormView(groupId, expenseId, query) {
   });
   const activeGroups = groupList?.groups.filter((group) => !group.archived) ?? [];
   const groupChip = activeGroups.length > 1 && pickerChip({
-    leading: groupIcon(bundle.group.emoji),
+    leading: groupIcon(bundle.group),
     label: 'Grupo',
     text: bundle.group.title,
     options: activeGroups.map((group) => [group.id, group.title]),
@@ -1774,7 +1858,7 @@ function activityRow(item, lastSeenId) {
   const isExpense = item.kind.startsWith('expense_') && item.kind !== 'expense_deleted';
   const href = isExpense ? `#/g/${item.groupId}/gasto/${item.subjectId}` : `#/g/${item.groupId}`;
   return el('a', { class: `row activity-row${unread ? ' unread' : ''}`, href },
-    item.actorId ? avatar(item.actorId, item.actorName) : groupIcon(item.groupEmoji),
+    item.actorId ? avatar(item.actorId, item.actorName) : groupIcon({ id: item.groupId, emoji: item.groupEmoji, color: item.groupColor }),
     el('span', { class: 'row-main' },
       el('strong', { class: 'wrap', text: activityText(item) }),
       el('span', { class: 'meta', text: `${item.groupTitle} · ${timeFormat.format(when)}` })),
@@ -2113,6 +2197,7 @@ async function settingsView(groupId) {
         emoji = value;
         patch({ emoji: value }, 'Icono', { rerender: false });
       })),
+      writable && field('Color', colorPicker(groupColor(group).key, (value) => patch({ color: value }, 'Color', { rerender: false }))),
       field('Moneda de las cuentas', currencySelect(group.baseCurrency, (value) => patch({ baseCurrency: value }, `Moneda del grupo: ${value}`),
         { disabled: !writable || bundle.expenses.length > 0 || bundle.settlements.length > 0 }),
       bundle.expenses.length || bundle.settlements.length ? 'No se puede cambiar cuando ya hay gastos o pagos.' : undefined),
@@ -2243,7 +2328,7 @@ async function sharedView(token) {
   }
   mount(
     el('header', { class: 'topbar' },
-      groupIcon(bundle.group.emoji),
+      groupIcon(bundle.group),
       el('h1', { text: bundle.group.title })),
     el('section', { class: 'content' },
       el('div', { class: 'banner', text: `Solo lectura · ${plural(bundle.members.length, 'persona', 'personas')} · importes en ${bundle.group.baseCurrency}` }),
@@ -2306,7 +2391,7 @@ async function personView(personId) {
           summary.groups.map((group) => {
             const balance = describe(group.balanceCents, group.baseCurrency);
             return el('a', { class: 'row', href: `#/g/${group.id}/saldos` },
-              groupIcon(group.emoji),
+              groupIcon(group),
               el('span', { class: 'row-main' },
                 el('strong', { text: group.title }),
                 group.archived && el('span', { class: 'meta', text: 'Archivado' })),

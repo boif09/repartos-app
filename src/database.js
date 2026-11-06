@@ -155,6 +155,14 @@ export const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 4,
+    name: 'color de cada grupo',
+    sql: `
+      -- Clave de shared/palette.js; NULL = color por defecto según el id del grupo.
+      ALTER TABLE expense_groups ADD COLUMN color TEXT;
+    `,
+  },
 ];
 
 export function openDatabase(options = {}) {

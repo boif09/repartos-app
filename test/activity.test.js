@@ -8,6 +8,7 @@ import { computePayers, mainPayer } from '../shared/splits.js';
 import { computeBalances, pairwiseDebts } from '../shared/balances.js';
 import { allocate } from '../shared/money.js';
 import { guessCategory } from '../shared/categories.js';
+import { GROUP_COLORS, groupColor } from '../shared/palette.js';
 import { describeForRecipient, encryptPayload } from '../src/push.js';
 
 const today = '2026-11-04';
@@ -317,4 +318,33 @@ test('avisos push: se envían al resto del grupo, firmados con VAPID, y se olvid
 
   result = await call('DELETE', '/push/subscriptions', { endpoint }, 'judit');
   assert.equal(result.subscribed, false);
+});
+
+// ---------- Color de grupo ----------
+
+test('color de grupo: por defecto según el id, se elige, se valida y se puede quitar', async (t) => {
+  const call = await startApp(t);
+  const { group } = await pareja(call);
+  assert.equal(group.color, null);
+  assert.equal(groupColor(group).key, GROUP_COLORS[(group.id - 1) % GROUP_COLORS.length].key);
+
+  let result = await call('POST', '/groups', { title: 'Viaje', color: 'berry' });
+  assert.equal(result.group.color, 'berry');
+  assert.equal(groupColor(result.group).key, 'berry');
+  assert.equal((await call('POST', '/groups', { title: 'Malo', color: '#ff0000' })).status, 400);
+
+  result = await call('PATCH', `/groups/${group.id}`, { color: 'amber' });
+  assert.equal(result.group.color, 'amber');
+  assert.equal((await call('GET', '/groups')).groups.find((g) => g.id === group.id).color, 'amber');
+  assert.equal((await call('PATCH', `/groups/${group.id}`, { color: 'violeta' })).status, 400);
+  result = await call('PATCH', `/groups/${group.id}`, { color: null });
+  assert.equal(result.group.color, null);
+
+  // Todos los colores de la paleta: texto blanco encima con contraste AA.
+  const luminance = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  for (const color of GROUP_COLORS) assert.ok(1.05 / (luminance(color.hex) + 0.05) >= 4.5, color.key);
 });
