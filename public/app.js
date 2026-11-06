@@ -571,8 +571,25 @@ function field(label, input, hint) {
 }
 
 function mount(...nodes) {
+  appEl.classList.remove('grouped');
+  appEl.style.removeProperty('--g');
   appEl.replaceChildren(...nodes);
   window.scrollTo(0, 0);
+}
+
+// Pantallas de un grupo (el grupo, sus gastos, pagos y ajustes): su color pasa a ser el acento
+// de botones, casillas y enlaces, y la barra superior va en ese color.
+function mountGroup(group, ...nodes) {
+  mount(...nodes);
+  appEl.classList.add('grouped');
+  tintWith(appEl, group);
+}
+
+function groupTopbar(group, { title, back, action }) {
+  const bar = topbar({ title, back, action });
+  bar.classList.add('tinted');
+  if (!title || title === group.title) bar.querySelector('h1').prepend(icon(groupIconName(group), { small: true }));
+  return bar;
 }
 
 function loading() {
@@ -697,6 +714,7 @@ async function newGroupView() {
     }
     newName.value = '';
     newName.focus();
+    updatePreview();
   };
   newName.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -704,6 +722,22 @@ async function newGroupView() {
       addNew();
     }
   });
+
+  const previewIcon = el('span', { class: 'tile-icon' }, icon(groupIconName({ emoji })));
+  const previewTitle = el('strong', { class: 'tile-title', text: 'Nuevo grupo' });
+  const previewCount = el('span', { class: 'tile-count' });
+  const preview = el('div', { class: 'group-tile featured tile-preview', 'aria-hidden': 'true' },
+    el('span', { class: 'tile-top' }, previewIcon, previewCount),
+    el('span', { class: 'tile-bottom' }, previewTitle, el('span', { class: 'tile-balance' }, el('span', { text: 'En paz' }))));
+  const updatePreview = () => {
+    previewTitle.textContent = title.value.trim() || 'Nuevo grupo';
+    previewCount.textContent = plural(selected.size + 1, 'persona', 'personas');
+    previewIcon.replaceChildren(icon(groupIconName({ emoji })));
+    tintWith(preview, { color });
+    tintWith(appEl, { color });
+  };
+  title.addEventListener('input', updatePreview);
+  peopleChips.addEventListener('click', () => setTimeout(updatePreview));
 
   const submit = el('button', { class: 'btn primary', type: 'submit', text: 'Crear grupo' });
   const form = el('form', {
@@ -726,9 +760,10 @@ async function newGroupView() {
       }
     },
   },
+  preview,
   field('Nombre', title),
-  field('Icono', emojiPicker(emoji, (value) => { emoji = value; })),
-  field('Color', colorPicker(color, (value) => { color = value; })),
+  field('Icono', emojiPicker(emoji, (value) => { emoji = value; updatePreview(); })),
+  field('Color', colorPicker(color, (value) => { color = value; updatePreview(); })),
   field('Moneda de las cuentas', currencySelect(baseCurrency, (value) => { baseCurrency = value; }),
     'Los saldos se calculan en esta moneda. En un viaje puedes dejar euros y apuntar cada gasto en la moneda local.'),
   el('div', { class: 'field' },
@@ -739,6 +774,8 @@ async function newGroupView() {
   submit);
 
   mount(topbar({ title: 'Nuevo grupo', back: '#/' }), form);
+  appEl.classList.add('grouped');
+  updatePreview();
   title.focus();
 }
 
@@ -1018,14 +1055,12 @@ async function groupView(groupId, tab) {
   const people = new Map(bundle.members.map((person) => [person.id, person]));
   const base = `#/g/${groupId}`;
 
-  const bar = tintWith(topbar({
+  const bar = groupTopbar(bundle.group, {
     title: bundle.group.title,
     back: '#/',
     action: el('a', { class: 'icon-btn', href: `${base}/ajustes`, 'aria-label': 'Ajustes del grupo' }, icon('settings')),
-  }), bundle.group);
-  bar.classList.add('tinted');
-  bar.querySelector('h1').prepend(icon(groupIconName(bundle.group), { small: true }));
-  mount(
+  });
+  mountGroup(bundle.group,
     bar,
     el('section', { class: 'content' },
       groupHeader(bundle, tab),
@@ -1741,7 +1776,9 @@ async function expenseFormView(groupId, expenseId, query) {
       }
     },
   },
-  el('div', { class: 'amount-row' }, amount, currencyInput),
+  el('div', { class: 'form-hero' },
+    el('span', { class: 'gh-label', text: editing ? `${bundle.group.title} · editar gasto` : `${bundle.group.title} · ¿cuánto ha sido?` }),
+    el('div', { class: 'amount-row' }, amount, currencyInput)),
   description,
   el('div', { class: 'chips' }, groupChip, payerChip, dateChip(date, () => refreshRate()), categoryChip),
   payersBox,
@@ -1779,7 +1816,7 @@ async function expenseFormView(groupId, expenseId, query) {
   // Guardar siempre a la vista, con el importe: sin tener que bajar hasta el final.
   el('div', { class: 'action-bar' }, submit));
 
-  mount(topbar({ title: editing ? 'Editar gasto' : 'Nuevo gasto', back: backHref }), form);
+  mountGroup(bundle.group, groupTopbar(bundle.group, { title: editing ? 'Editar gasto' : 'Nuevo gasto', back: backHref }), form);
   renderFx();
   renderSplitBody();
   renderPayers();
@@ -2021,14 +2058,31 @@ async function settlementFormView(groupId, query) {
   const cur = bundle.group.baseCurrency;
   const curExp = currencyExponent(cur);
 
-  const amount = el('input', { type: 'text', inputMode: 'decimal', placeholder: curExp ? '0,00' : '0', class: 'amount-input', autocomplete: 'off', value: suggested ? centsToInput(suggested, curExp) : '' });
-  const date = el('input', { type: 'date', value: todayIso(), max: '2100-12-31' });
+  const amount = el('input', { type: 'text', inputMode: 'decimal', placeholder: curExp ? '0,00' : '0', class: 'amount-input', autocomplete: 'off', 'aria-label': 'Importe', value: suggested ? centsToInput(suggested, curExp) : '' });
+  const date = el('input', { type: 'date', value: todayIso(), max: '2100-12-31', 'aria-label': 'Fecha' });
+  // "Ana → Bea": se actualiza al elegir; así se lee de un vistazo qué se va a apuntar.
+  const summary = el('span', { class: 'gh-label' });
+  const updateSummary = () => {
+    summary.textContent = fromId && toId && fromId !== toId
+      ? paymentText(people, fromId, toId, 'present')
+      : 'Elige quién paga y quién recibe';
+  };
   const personChips = (selectedId, onPick) => el('div', { class: 'chips', role: 'radiogroup' },
-    members.map((member) => chip({ label: personName(people, member.id), selected: member.id === selectedId, role: 'radio', onToggle: () => onPick(member.id) })));
+    members.map((member) => chip({
+      label: el('span', { class: 'person-chip' }, avatar(member.id, member.name), el('span', { text: personName(people, member.id) })),
+      ariaLabel: personName(people, member.id),
+      className: 'chip person',
+      selected: member.id === selectedId,
+      role: 'radio',
+      onToggle: () => {
+        onPick(member.id);
+        updateSummary();
+      },
+    })));
 
   const submit = el('button', { class: 'btn primary', type: 'submit', text: 'Registrar pago' });
   const form = el('form', {
-    class: 'content form',
+    class: 'content form expense-form',
     novalidate: true,
     onSubmit: async (event) => {
       event.preventDefault();
@@ -2066,13 +2120,17 @@ async function settlementFormView(groupId, query) {
       }
     },
   },
+  el('div', { class: 'form-hero' },
+    summary,
+    el('div', { class: 'amount-row' }, amount, el('span', { class: 'hero-currency', text: cur }))),
+  suggested && el('p', { class: 'field-hint', text: 'Es lo que queda pendiente. Puedes cambiarlo si es un pago parcial.' }),
   el('div', { class: 'field' }, el('span', { class: 'field-label', text: 'Paga' }), personChips(fromId, (value) => { fromId = value; })),
   el('div', { class: 'field' }, el('span', { class: 'field-label', text: 'Recibe' }), personChips(toId, (value) => { toId = value; })),
-  field(`Importe (${currencySymbol(cur)})`, amount, suggested ? 'Puedes cambiarlo si es un pago parcial.' : undefined),
-  field('Fecha', date),
-  submit);
+  el('div', { class: 'chips' }, dateChip(date, () => {})),
+  el('div', { class: 'action-bar' }, submit));
 
-  mount(topbar({ title: 'Registrar pago', back: `#/g/${groupId}/saldos` }), form);
+  updateSummary();
+  mountGroup(bundle.group, groupTopbar(bundle.group, { title: 'Registrar pago', back: `#/g/${groupId}/saldos` }), form);
 }
 
 // Reparto con el que empieza cada gasto nuevo del grupo (p. ej. 60/40 en Pareja).
@@ -2188,8 +2246,8 @@ async function settingsView(groupId) {
     }
   };
 
-  mount(
-    topbar({ title: 'Ajustes del grupo', back: `#/g/${groupId}` }),
+  mountGroup(group,
+    groupTopbar(group, { title: 'Ajustes del grupo', back: `#/g/${groupId}` }),
     el('section', { class: 'content form' },
       field('Nombre', title),
       el('p', { class: 'muted small', text: writable ? 'Los cambios se guardan solos.' : 'Grupo archivado: solo lectura.' }),
@@ -2197,7 +2255,10 @@ async function settingsView(groupId) {
         emoji = value;
         patch({ emoji: value }, 'Icono', { rerender: false });
       })),
-      writable && field('Color', colorPicker(groupColor(group).key, (value) => patch({ color: value }, 'Color', { rerender: false }))),
+      writable && field('Color', colorPicker(groupColor(group).key, (value) => {
+        tintWith(appEl, { ...group, color: value });
+        patch({ color: value }, 'Color', { rerender: false });
+      })),
       field('Moneda de las cuentas', currencySelect(group.baseCurrency, (value) => patch({ baseCurrency: value }, `Moneda del grupo: ${value}`),
         { disabled: !writable || bundle.expenses.length > 0 || bundle.settlements.length > 0 }),
       bundle.expenses.length || bundle.settlements.length ? 'No se puede cambiar cuando ya hay gastos o pagos.' : undefined),

@@ -28,6 +28,7 @@
   --tint-ink: 85%;
   --tint-base: #000000;
   --tab-active: #ffffff;
+  --tint-on: #ffffff;
   --positive: #0b7a4b;
   --negative: #c03a1f;
   --danger: #c03a1f;
@@ -73,6 +74,7 @@
     --tint-ink: 38%;
     --tint-base: #ffffff;
     --tab-active: #323844;
+    --tint-on: #0d0f12;
     --positive: #4fc48c;
     --negative: #ff7f61;
     --danger: #ff7f61;
@@ -101,6 +103,7 @@
   --tint-ink: 38%;
   --tint-base: #ffffff;
   --tab-active: #323844;
+  --tint-on: #0d0f12;
   --positive: #4fc48c;
   --negative: #ff7f61;
   --danger: #ff7f61;
@@ -905,3 +908,50 @@ dialog.sheet[open] { animation: sheet-in .18s ease-out; }
 .chip.color-chip { width: 44px; height: 44px; padding: 0; justify-content: center; border-radius: 50%; }
 .chip.color-chip .swatch { width: 28px; height: 28px; border-radius: 50%; }
 .chip.color-chip[aria-checked="true"] { background: var(--surface); border-color: var(--text); border-width: 2px; }
+
+/* ---------- Pantallas de un grupo: su color es el acento ---------- */
+.app.grouped {
+  --accent: color-mix(in srgb, var(--g) var(--tint-ink), var(--tint-base));
+  --accent-soft: color-mix(in srgb, var(--g) var(--tint-soft), var(--surface));
+  --accent-text: var(--tint-on);
+}
+.app.grouped .chip[aria-checked="true"]:not(.color-chip) { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+
+/* Cabecera de los formularios (importe grande sobre el color del grupo), como la del grupo */
+.form-hero {
+  display: grid;
+  gap: 8px;
+  margin: -16px -16px 4px;
+  padding: 2px 16px 18px;
+  border-radius: 0 0 26px 26px;
+  background: var(--g);
+  color: #fff;
+}
+.form-hero .gh-label { padding-left: 4px; }
+.form-hero .amount-row { align-items: center; }
+.form-hero .amount-input {
+  border-color: transparent;
+  background: rgb(255 255 255 / 14%);
+  color: #fff;
+}
+.form-hero .amount-input::placeholder { color: rgb(255 255 255 / 60%); opacity: 1; }
+.form-hero .amount-input:focus-visible { outline: 2px solid #fff; outline-offset: 0; box-shadow: none; }
+.form-hero .currency-select { border-color: transparent; background: rgb(255 255 255 / 14%); color: #fff; }
+.form-hero .currency-select .chevron { color: rgb(255 255 255 / 80%); }
+.form-hero .currency-select:focus-within { outline-color: #fff; }
+.form-hero .hero-currency { padding: 0 12px; font-family: var(--mono); font-size: var(--fs-lg); font-weight: 500; color: rgb(255 255 255 / 88%); }
+
+/* Personas con su avatar en los selectores (pago) */
+.chip.person { padding: 0 14px 0 4px; min-height: 44px; }
+.person-chip { display: inline-flex; align-items: center; gap: 8px; }
+.person-chip .avatar { width: 34px; height: 34px; }
+
+/* Vista previa del grupo nuevo */
+.group-tile.tile-preview { grid-column: auto; min-height: 128px; }
+.group-tile .tile-icon { display: inline-flex; }
+
+/* El selector segmentado de los formularios, igual que las pestañas del grupo */
+.segmented { border: 0; padding: 3px; gap: 3px; background: var(--surface-2); border-radius: var(--r-md); }
+.segmented button { min-height: 38px; border-radius: 9px; }
+.segmented button + button { border-left: 0; }
+.segmented button[aria-checked="true"] { background: var(--tab-active); color: var(--text); box-shadow: 0 1px 3px rgb(0 0 0 / 12%); }
