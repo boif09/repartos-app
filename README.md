@@ -16,6 +16,7 @@ El diseño completo está en [docs/DISENO-MVP.md](docs/DISENO-MVP.md).
 | F5 | Despliegue en `repartos.jusboif.es`, script de despliegue y copias diarias | ✅ ([guía](docs/DESPLIEGUE.md)) |
 | F6 | Apariencia clara/oscura, gastos y pagos sin conexión con sincronización automática | ✅ |
 | F7 | Varios pagadores por gasto, autoría y actividad con novedades, avisos push, resumen del grupo, categorías y búsqueda | ✅ |
+| F8 | Diseño con color por grupo, gastos recurrentes y resumen de viaje (gasto por día) | ✅ |
 
 ## Requisitos
 
@@ -55,6 +56,7 @@ npm test
 | `BASE_PATH` | `/` | Ruta pública (la app vive en la raíz de `repartos.jusboif.es`) |
 | `DB_PATH` | `data/repartos.db` | Base de datos SQLite |
 | `FX_API_URL` | `https://api.frankfurter.dev/v1` | API de tipos de cambio del BCE |
+| `APP_TIMEZONE` | `Europe/Madrid` | Zona horaria para decidir qué día es hoy al crear los gastos recurrentes |
 | `PUSH_SUBJECT` | `https://repartos.jusboif.es` | Contacto VAPID que se envía a los servicios de avisos push |
 | `NODE_ENV` | — | `production` exige `APP_USERS` y prohíbe `DEV_REMOTE_USER` |
 

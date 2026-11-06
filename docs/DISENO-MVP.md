@@ -352,3 +352,25 @@ Antes de cancelar Splitwise: exportar el CSV de cada grupo (Splitwise lo permite
 - Pestaña "Resumen" en cada grupo: total gastado, número de gastos, fechas, media diaria, lo que pagó cada uno frente a su parte y gasto por categoría.
 - `shared/categories.js`: categorías fijas y sugerencia automática por palabras de la descripción, que el usuario puede cambiar.
 - Búsqueda en la lista de gastos (a partir de 4 gastos), sin tildes ni mayúsculas.
+
+---
+
+## 12. Ampliaciones (F8)
+
+### 12.1 Color de grupo
+
+- `expense_groups.color` (migración 4) con una clave de `shared/palette.js`; sin elegir, un color fijo según el id. Los 8 tonos dan contraste AA con texto blanco.
+- Las pantallas de un grupo (gastos, pago, ajustes) usan su color como acento (`.app.grouped`, variable `--g`).
+
+### 12.2 Gastos recurrentes
+
+- Migración 5: tabla `recurring_expenses` (id = el del primer gasto, frecuencia semanal/mensual/anual, `anchor_on`, `next_on`, `template`, `paused_reason`) y `expenses.recurring_id`.
+- Se crean al guardar un gasto con "Repetir" (solo en la moneda del grupo). El servidor genera las repeticiones pendientes al arrancar, cada hora y al crear la serie (si la fecha era antigua, se rellenan las que faltaban).
+- Cada repetición tiene un id determinista (sha256 de la serie y la fecha): una pasada cortada a medias no duplica nada.
+- Mensual y anual conservan el día de la primera vez (31 → 28 feb → 31 mar). "Hoy" se calcula en `APP_TIMEZONE`.
+- Si una repetición no se puede crear (alguien salió del grupo, grupo archivado), la serie se pausa y el motivo se ve en Ajustes.
+- Editar una repetición con "aplicar también a las próximas" actualiza la plantilla. "Dejar de repetir" borra la serie; los gastos ya creados se quedan.
+
+### 12.3 Viajes
+
+- `expense_groups.is_trip`. En el Resumen de un viaje: barras de gasto por día (por semana si pasa de 45 días) y lo que le costó el viaje a cada uno, con su media diaria.

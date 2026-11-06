@@ -6,6 +6,7 @@ import { isPushEndpoint } from './push.js';
 import { computePayers, computeShares, mainPayer, SplitError, SPLIT_MODES } from '../shared/splits.js';
 import { CATEGORY_KEYS } from '../shared/categories.js';
 import { GROUP_COLOR_KEYS } from '../shared/palette.js';
+import { FREQUENCIES, nextOccurrence, todayIn } from '../shared/recurring.js';
 import { computeBalances, pairwiseDebts } from '../shared/balances.js';
 import { settle } from '../shared/settle.js';
 
@@ -84,6 +85,7 @@ const toGroup = (row) => ({
   title: row.title,
   emoji: row.emoji ?? null,
   color: row.color ?? null,
+  isTrip: row.is_trip === 1,
   baseCurrency: row.base_currency,
   simplifyDebts: row.simplify_debts === 1,
   defaultSplit: parseDefaultSplit(row.default_split),
@@ -430,6 +432,7 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
       balances: [...balances].map(([personId, amountCents]) => ({ personId, amountCents })),
       transfers,
       myBalanceCents: balances.has(meId) ? balances.get(meId) : null,
+      recurring: listRecurring(row.id),
     };
   }
 
@@ -499,7 +502,8 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
     const members = Array.isArray(body?.members) ? body.members : [];
     if (members.length > 50) throw badRequest('Demasiadas personas en el grupo.');
     return transaction(() => {
-      const result = db.prepare('INSERT INTO expense_groups (title, emoji, color, base_currency) VALUES (?, ?, ?, ?)').run(title, groupEmoji, color, baseCurrency);
+      const result = db.prepare('INSERT INTO expense_groups (title, emoji, color, base_currency, is_trip) VALUES (?, ?, ?, ?, ?)')
+        .run(title, groupEmoji, color, baseCurrency, body?.isTrip ? 1 : 0);
       const groupId = Number(result.lastInsertRowid);
       addMemberRow(groupId, meId);
       for (const member of members) addMemberRow(groupId, resolveMemberInput(member));
@@ -524,6 +528,9 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
       }
       if (body?.emoji !== undefined) {
         db.prepare('UPDATE expense_groups SET emoji = ? WHERE id = ?').run(emoji(body.emoji), row.id);
+      }
+      if (body?.isTrip !== undefined) {
+        db.prepare('UPDATE expense_groups SET is_trip = ? WHERE id = ?').run(body.isTrip ? 1 : 0, row.id);
       }
       if (body?.color !== undefined) {
         db.prepare('UPDATE expense_groups SET color = ? WHERE id = ?').run(groupColorKey(body.color), row.id);
@@ -628,6 +635,7 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
       payerId: row.payer_id,
       payers: payers.length ? payers : [{ personId: row.payer_id, inputValue: row.original_minor, paidCents: row.base_cents }],
       category: row.category ?? null,
+      recurringId: row.recurring_id ?? null,
       createdBy: row.created_by ?? null,
       updatedBy: row.updated_by ?? null,
       amountCents: row.base_cents,
@@ -761,29 +769,158 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
   }
 
   // Idempotente: el móvil genera el UUID; si reintenta por mala conexión, no se duplica.
-  function createExpense(groupId, body, meId = null) {
+  // body.repeat ('weekly' | 'monthly' | 'yearly') crea además una serie que empieza con este gasto.
+  // recurringId solo lo pasa el generador de repeticiones.
+  function createExpense(groupId, body, meId = null, { recurringId = null } = {}) {
     const id = uuid(body?.id);
     const row = getWritableGroupRow(groupId);
-    const existing = db.prepare('SELECT group_id FROM expenses WHERE id = ?').get(id);
+    const existing = db.prepare('SELECT group_id, recurring_id FROM expenses WHERE id = ?').get(id);
     if (existing) {
       if (existing.group_id !== row.id) throw conflict('Ese identificador ya está en uso.');
+      // El id de una repetición se puede calcular: si ya lo usa otro gasto, no se da por creada.
+      if (recurringId && existing.recurring_id !== recurringId) throw conflict('El identificador de esta repetición ya está en uso.');
       return { created: false, expense: getExpense(id) };
     }
     const input = parseExpenseInput(body, row, id);
+    const repeat = recurringId ? null : parseRepeat(body?.repeat, input, row);
     const expense = transaction(() => {
+      if (recurringId && !db.prepare('SELECT 1 FROM recurring_expenses WHERE id = ?').get(recurringId)) {
+        throw notFound('Este gasto ya no se repite.');
+      }
       db.prepare(`
         INSERT INTO expenses (id, group_id, description, spent_on, payer_id, original_minor, currency, fx_rate, fx_source,
-          base_cents, split_mode, notes, category, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          base_cents, split_mode, notes, category, created_by, recurring_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, row.id, input.description, input.spentOn, input.payerId, input.originalMinor, input.currency, input.fxRate,
-        input.fxSource, input.amountCents, input.splitMode, input.notes, input.category, meId);
+        input.fxSource, input.amountCents, input.splitMode, input.notes, input.category, meId, recurringId ?? (repeat ? id : null));
       insertShares(id, input.shares);
       insertPayers(id, input.payers);
+      if (repeat) {
+        db.prepare(`
+          INSERT INTO recurring_expenses (id, group_id, frequency, anchor_on, next_on, template, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(id, row.id, repeat, input.spentOn, nextOccurrence(input.spentOn, repeat), JSON.stringify(recurringTemplate(body)), meId);
+      }
       const created = getExpense(id);
-      logActivity(row.id, meId, 'expense_created', id, expenseSummary(created, row));
+      // Las repeticiones las crea la app (sin autor en la actividad): así el aviso llega a todos.
+      logActivity(row.id, recurringId ? null : meId, 'expense_created', id, {
+        ...expenseSummary(created, row),
+        ...(recurringId ? { recurring: true } : {}),
+        ...(repeat ? { repeat } : {}),
+      });
       return created;
     });
+    // Si la primera fecha era antigua, las repeticiones que ya tocaban se crean ahora.
+    if (repeat) generateRecurring();
     return { created: true, expense };
+  }
+
+  // ---------- Gastos recurrentes ----------
+
+  function parseRepeat(value, input, groupRow) {
+    if (value === undefined || value === null || value === '' || value === 'none') return null;
+    if (!FREQUENCIES.includes(value)) throw badRequest('Frecuencia de repetición no válida.');
+    // Con otra moneda haría falta el tipo de cambio de cada día: las series van en la del grupo.
+    if (input.currency !== groupRow.base_currency) throw badRequest(`Los gastos recurrentes van en ${groupRow.base_currency}, la moneda del grupo.`);
+    return value;
+  }
+
+  // Lo que se repite: todo menos el id, la fecha y la propia repetición.
+  function recurringTemplate(body) {
+    const template = {};
+    for (const key of ['description', 'amountCents', 'payerId', 'payers', 'splitMode', 'shares', 'category', 'notes']) {
+      if (body?.[key] !== undefined) template[key] = body[key];
+    }
+    return template;
+  }
+
+  function parseTemplate(row) {
+    try {
+      return JSON.parse(row.template);
+    } catch {
+      return {};
+    }
+  }
+
+  function toRecurring(row) {
+    const template = parseTemplate(row);
+    return {
+      id: row.id,
+      groupId: row.group_id,
+      frequency: row.frequency,
+      nextOn: row.next_on,
+      description: template.description ?? '',
+      amountCents: Number(template.amountCents) || 0,
+      category: template.category ?? null,
+      payerId: template.payers?.[0]?.personId ?? template.payerId ?? null,
+      pausedReason: row.paused_reason ?? null,
+      createdBy: row.created_by ?? null,
+    };
+  }
+
+  function listRecurring(groupId) {
+    return db.prepare('SELECT * FROM recurring_expenses WHERE group_id = ? ORDER BY next_on, created_at').all(groupId).map(toRecurring);
+  }
+
+  function getRecurringRow(rawId) {
+    const row = db.prepare('SELECT * FROM recurring_expenses WHERE id = ?').get(uuid(rawId));
+    if (!row) throw notFound('Este gasto ya no se repite.');
+    return row;
+  }
+
+  // Dejar de repetir: los gastos ya creados se quedan; solo deja de haber nuevos.
+  function stopRecurring(rawId, meId = null) {
+    const row = getRecurringRow(rawId);
+    getWritableGroupRow(row.group_id);
+    if (meId !== null && !memberIds(row.group_id).includes(meId)) throw notFound('Este gasto ya no se repite.');
+    return transaction(() => {
+      db.prepare('DELETE FROM recurring_expenses WHERE id = ?').run(row.id);
+      const recurring = toRecurring(row);
+      logActivity(row.group_id, meId, 'recurring_stopped', row.id, { description: recurring.description, frequency: row.frequency });
+      return recurring;
+    });
+  }
+
+  // Al editar un gasto de una serie se puede aplicar el cambio a las próximas repeticiones.
+  function updateRecurringTemplate(recurringId, body, groupRow) {
+    const row = db.prepare('SELECT * FROM recurring_expenses WHERE id = ?').get(recurringId);
+    if (!row) return;
+    const currency = body?.currency === undefined ? groupRow.base_currency : body.currency;
+    if (currency !== groupRow.base_currency) throw badRequest(`Los gastos recurrentes van en ${groupRow.base_currency}, la moneda del grupo.`);
+    db.prepare('UPDATE recurring_expenses SET template = ?, paused_reason = NULL WHERE id = ?').run(JSON.stringify(recurringTemplate(body)), row.id);
+  }
+
+  // Id estable de cada repetición: si el generador se corta a medias, al volver no duplica nada.
+  function occurrenceId(recurringId, date) {
+    const hex = crypto.createHash('sha256').update(`repartos:recurrente:${recurringId}:${date}`).digest('hex');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${((parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  }
+
+  // Crea las repeticiones que ya tocan (hasta hoy). Lo llama el servidor al arrancar y cada hora.
+  // Máximo 600 por serie y pasada (más de 11 años semanales): una fecha absurda no bloquea el servidor.
+  function generateRecurring({ today = todayIn(process.env.APP_TIMEZONE || 'Europe/Madrid') } = {}) {
+    const due = db.prepare('SELECT * FROM recurring_expenses WHERE paused_reason IS NULL AND next_on <= ? ORDER BY next_on').all(today);
+    let created = 0;
+    for (const rule of due) {
+      let nextOn = rule.next_on;
+      const template = parseTemplate(rule);
+      for (let count = 0; count < 600 && nextOn <= today; count += 1) {
+        try {
+          const result = createExpense(rule.group_id, { ...template, id: occurrenceId(rule.id, nextOn), spentOn: nextOn }, rule.created_by, { recurringId: rule.id });
+          if (result.created) created += 1;
+        } catch (error) {
+          if (!db.prepare('SELECT 1 FROM recurring_expenses WHERE id = ?').get(rule.id)) break;
+          // Grupo archivado, alguien que ya no está… La serie se pausa y se explica en Ajustes.
+          const reason = error.status ? error.message : 'No se pudo crear la repetición.';
+          db.prepare('UPDATE recurring_expenses SET paused_reason = ? WHERE id = ?').run(reason, rule.id);
+          if (!error.status) console.error('Error en un gasto recurrente:', error);
+          break;
+        }
+        nextOn = nextOccurrence(nextOn, rule.frequency, rule.anchor_on);
+        db.prepare('UPDATE recurring_expenses SET next_on = ? WHERE id = ?').run(nextOn, rule.id);
+      }
+    }
+    return created;
   }
 
   function getEditableExpenseRow(rawId) {
@@ -817,6 +954,7 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
       insertShares(row.id, input.shares);
       db.prepare('DELETE FROM expense_payers WHERE expense_id = ?').run(row.id);
       insertPayers(row.id, input.payers);
+      if (body?.applyToRecurring && row.recurring_id) updateRecurringTemplate(row.recurring_id, body, groupRow);
       const after = getExpense(row.id);
       const changes = expenseChanges(before, after);
       if (changes.length) {
@@ -973,6 +1111,8 @@ export function createRepository(db, { onActivity = () => {} } = {}) {
     updateExpense,
     deleteExpense,
     restoreExpense,
+    generateRecurring,
+    stopRecurring,
     createSettlement,
     deleteSettlement,
     restoreSettlement,

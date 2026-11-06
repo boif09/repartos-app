@@ -56,7 +56,9 @@ export function describeForRecipient(event, recipientId, groupTitle) {
     : money(data.amountCents ?? 0);
   let body;
   switch (event.kind) {
-    case 'expense_created': body = `${actor} añadió «${data.description}»: ${amount}${share}`; break;
+    case 'expense_created': body = data.recurring
+      ? `Gasto recurrente «${data.description}»: ${amount}${share}`
+      : `${actor} añadió «${data.description}»: ${amount}${share}`; break;
     case 'expense_updated': body = `${actor} editó «${data.description}»: ${amount}${share}`; break;
     case 'expense_deleted': body = `${actor} borró «${data.description}» (${amount})`; break;
     case 'settlement_created': {

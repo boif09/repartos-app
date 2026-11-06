@@ -955,3 +955,37 @@ dialog.sheet[open] { animation: sheet-in .18s ease-out; }
 .segmented button { min-height: 38px; border-radius: 9px; }
 .segmented button + button { border-left: 0; }
 .segmented button[aria-checked="true"] { background: var(--tab-active); color: var(--text); box-shadow: 0 1px 3px rgb(0 0 0 / 12%); }
+
+/* ---------- Gastos recurrentes ---------- */
+.meta-icon { display: inline-flex; vertical-align: -3px; margin-right: 4px; color: var(--accent); }
+.meta-icon .icon { width: 14px; height: 14px; }
+.recurring-row { align-items: flex-start; }
+.recurring-row .row-main { gap: 2px; }
+.recurring-row .link-btn { justify-self: start; padding: 4px 0 0; }
+.meta.negative { color: var(--negative); white-space: normal; }
+
+/* ---------- Viajes: gasto por día ---------- */
+.day-chart-card { display: grid; gap: 8px; }
+.day-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; }
+.day-bar {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.day-fill {
+  display: block;
+  width: 100%;
+  border-radius: 4px 4px 1px 1px;
+  background: color-mix(in srgb, var(--g) var(--tint-soft), var(--surface-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--g) 30%, transparent);
+}
+.day-bar.top .day-fill, .day-bar.selected .day-fill { background: color-mix(in srgb, var(--g) var(--tint-ink), var(--tint-base)); box-shadow: none; }
+.day-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.day-chart-axis { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--muted); text-transform: capitalize; }
+.recurring-row .meta { white-space: normal; }

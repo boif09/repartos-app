@@ -9,6 +9,7 @@ import { computePayers, computeShares, mainPayer, SplitError } from './shared/sp
 import { payersOf } from './shared/balances.js';
 import { CATEGORIES, categoryOf, guessCategory } from './shared/categories.js';
 import { GROUP_COLORS, groupColor } from './shared/palette.js';
+import { FREQUENCY_LABELS } from './shared/recurring.js';
 
 const appEl = document.getElementById('app');
 const GROUP_EMOJIS = ['👥', '❤️', '🏠', '✈️', '🏖️', '⛰️', '🍻', '🎉'];
@@ -295,6 +296,7 @@ const ICONS = {
   ],
   plus: ['M12 5v14', 'M5 12h14'],
   swap: ['M7 7h11l-3-3', 'M17 17H6l3 3'],
+  repeat: ['M17 2l4 4-4 4', 'M3 11v-1a4 4 0 0 1 4-4h14', 'M7 22l-4-4 4-4', 'M21 13v1a4 4 0 0 1-4 4H3'],
   check: ['M20 6L9 17l-5-5'],
   bell: ['M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9', 'M10.3 21a1.9 1.9 0 0 0 3.4 0'],
   search: ['M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z', 'M21 21l-4.3-4.3'],
@@ -723,6 +725,15 @@ async function newGroupView() {
     }
   });
 
+  // Viaje: se activa solo con iconos de viaje (avión, playa, montaña) hasta que se toque a mano.
+  const TRIP_EMOJIS = new Set(['✈️', '🏖️', '⛰️']);
+  let tripTouched = false;
+  const tripSwitch = el('input', {
+    type: 'checkbox',
+    class: 'switch',
+    checked: false,
+    onChange: () => { tripTouched = true; },
+  });
   const previewIcon = el('span', { class: 'tile-icon' }, icon(groupIconName({ emoji })));
   const previewTitle = el('strong', { class: 'tile-title', text: 'Nuevo grupo' });
   const previewCount = el('span', { class: 'tile-count' });
@@ -752,7 +763,7 @@ async function newGroupView() {
       }
       submit.disabled = true;
       try {
-        const bundle = await api('groups', { method: 'POST', body: { title: title.value, emoji, color, baseCurrency, members: [...selected.values()] } });
+        const bundle = await api('groups', { method: 'POST', body: { title: title.value, emoji, color, isTrip: tripSwitch.checked, baseCurrency, members: [...selected.values()] } });
         navigate(`#/g/${bundle.group.id}`, { replace: true });
       } catch (error) {
         handleError(error);
@@ -762,8 +773,17 @@ async function newGroupView() {
   },
   preview,
   field('Nombre', title),
-  field('Icono', emojiPicker(emoji, (value) => { emoji = value; updatePreview(); })),
+  field('Icono', emojiPicker(emoji, (value) => {
+    emoji = value;
+    if (!tripTouched) tripSwitch.checked = TRIP_EMOJIS.has(value);
+    updatePreview();
+  })),
   field('Color', colorPicker(color, (value) => { color = value; updatePreview(); })),
+  el('label', { class: 'card switch-row' },
+    el('span', {},
+      el('strong', { text: 'Es un viaje' }),
+      el('span', { class: 'muted small block', text: 'El resumen mostrará el gasto de cada día y lo que le costó el viaje a cada uno.' })),
+    tripSwitch),
   field('Moneda de las cuentas', currencySelect(baseCurrency, (value) => { baseCurrency = value; }),
     'Los saldos se calculan en esta moneda. En un viaje puedes dejar euros y apuntar cada gasto en la moneda local.'),
   el('div', { class: 'field' },
@@ -829,7 +849,9 @@ function timeline(bundle, people, { emptyText } = {}) {
       categoryTile(expense),
       el('span', { class: 'row-main' },
         el('strong', { text: expense.description }),
-        el('span', { class: 'meta', text: `${payersText(expense, people, meId)} · ${splitSummary(expense, bundle.members.length)}` })),
+        el('span', { class: 'meta' },
+          expense.recurringId && el('span', { class: 'meta-icon', title: 'Gasto recurrente' }, icon('repeat', { small: true })),
+          `${payersText(expense, people, meId)} · ${splitSummary(expense, bundle.members.length)}`)),
       el('span', { class: 'row-side' },
         el('strong', { text: formatMoney(expense.originalMinor, expense.currency) }),
         expense.currency !== cur && el('span', { class: 'muted small num', text: `≈ ${formatMoney(expense.amountCents, cur)}` }),
@@ -989,6 +1011,58 @@ function searchableTimeline(bundle, people) {
   return el('div', { class: 'stack' }, el('label', { class: 'search-box' }, icon('search', { small: true }), input), results);
 }
 
+// Viajes: una barra por día, del primero al último gasto (los días sin gastos también cuentan).
+// Más de 45 días se agrupan por semanas para que las barras no queden como hilos.
+function dailyChart(expenses, cur) {
+  const byDay = new Map();
+  for (const expense of expenses) byDay.set(expense.spentOn, (byDay.get(expense.spentOn) || 0) + expense.amountCents);
+  const sorted = [...byDay.keys()].sort();
+  const start = new Date(`${sorted[0]}T12:00:00`);
+  const end = new Date(`${sorted.at(-1)}T12:00:00`);
+  // Un viaje de más de un año (o una fecha mal puesta) no se dibuja: serían cientos de barras.
+  if (!(end - start <= 366 * 86400000)) return null;
+  const days = [];
+  for (let day = new Date(start); day <= end; day.setDate(day.getDate() + 1)) {
+    const iso = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+    days.push({ iso, cents: byDay.get(iso) || 0 });
+  }
+  const weekly = days.length > 45;
+  const buckets = weekly
+    ? Array.from({ length: Math.ceil(days.length / 7) }, (_, index) => {
+      const slice = days.slice(index * 7, index * 7 + 7);
+      return { iso: slice[0].iso, cents: slice.reduce((sum, day) => sum + day.cents, 0), label: `Semana del ${formatDay(slice[0].iso).toLowerCase()}` };
+    })
+    : days.map((day) => ({ ...day, label: formatDay(day.iso) }));
+  const max = Math.max(1, ...buckets.map((bucket) => bucket.cents));
+  const top = buckets.reduce((best, bucket) => (bucket.cents > best.cents ? bucket : best), buckets[0]);
+  const detail = el('span', { class: 'muted small', text: `El día de más gasto: ${top.label.toLowerCase()}, ${formatMoney(top.cents, cur)}` });
+
+  const chart = el('div', { class: 'day-chart', role: 'list', 'aria-label': weekly ? 'Gasto por semana' : 'Gasto por día' },
+    buckets.map((bucket) => {
+      const column = el('button', {
+        type: 'button',
+        class: bucket === top ? 'day-bar top' : 'day-bar',
+        role: 'listitem',
+        'aria-label': `${bucket.label}: ${formatMoney(bucket.cents, cur)}`,
+        onClick: () => {
+          chart.querySelectorAll('.day-bar.selected').forEach((node) => node.classList.remove('selected'));
+          column.classList.add('selected');
+          detail.textContent = `${bucket.label}: ${formatMoney(bucket.cents, cur)}`;
+        },
+      }, el('span', { class: 'day-fill' }));
+      column.firstChild.style.height = `${bucket.cents ? Math.max(4, Math.round((bucket.cents / max) * 100)) : 0}%`;
+      return column;
+    }));
+  const first = buckets[0].label;
+  const last = buckets.at(-1).label;
+  return el('div', { class: 'stack' },
+    el('h2', { class: 'section-title', text: weekly ? 'Gasto por semana' : 'Gasto por día' }),
+    el('div', { class: 'card day-chart-card' },
+      chart,
+      el('div', { class: 'day-chart-axis', 'aria-hidden': 'true' }, el('span', { text: first }), buckets.length > 1 && el('span', { text: last })),
+      detail));
+}
+
 // Cuánto ha costado el grupo o el viaje, quién pagó, a quién le corresponde y en qué se fue.
 function summaryPanel(bundle, people) {
   const cur = bundle.group.baseCurrency;
@@ -1015,6 +1089,7 @@ function summaryPanel(bundle, people) {
     return el('span', { class: 'bar', 'aria-hidden': 'true' }, fill);
   };
   const percent = (value) => `${Math.round((value / total) * 100)} %`;
+  const trip = Boolean(bundle.group.isTrip);
 
   return tintWith(el('div', { class: 'stack' },
     el('div', { class: 'card summary' },
@@ -1025,7 +1100,8 @@ function summaryPanel(bundle, people) {
         range,
         days > 1 ? `${formatMoney(Math.round(total / days), cur)} al día` : null,
       ].filter(Boolean).join(' · ') })),
-    el('h2', { class: 'section-title', text: 'Por persona' }),
+    trip && dailyChart(expenses, cur),
+    el('h2', { class: 'section-title', text: trip ? 'Lo que le costó el viaje a cada uno' : 'Por persona' }),
     el('div', { class: 'card list' },
       bundle.members
         .filter((member) => paid.get(member.id) || owed.get(member.id))
@@ -1037,7 +1113,9 @@ function summaryPanel(bundle, people) {
             el('span', { class: 'meta', text: `Pagó ${formatMoney(paid.get(member.id) || 0, cur)}` })),
           el('span', { class: 'row-side' },
             el('strong', { class: 'amount', text: formatMoney(owed.get(member.id) || 0, cur) }),
-            el('span', { class: 'small muted', text: 'su parte' }))))),
+            el('span', { class: 'small muted', text: trip && days > 1
+              ? `${formatMoney(Math.round((owed.get(member.id) || 0) / days), cur)} al día`
+              : 'su parte' }))))),
     el('h2', { class: 'section-title', text: 'Por categoría' }),
     el('div', { class: 'card list' },
       [...byCategory].sort((a, b) => b[1] - a[1]).map(([key, value]) => el('div', { class: 'row static category-row' },
@@ -1292,6 +1370,7 @@ async function expenseFormView(groupId, expenseId, query) {
     renderFx();
     renderSplitBody();
     refreshRate();
+    syncRepeat();
   });
   const date = el('input', { type: 'date', value: editing?.spentOn ?? todayIso(), max: '2100-12-31', 'aria-label': 'Fecha' });
   const rateInput = el('input', { type: 'text', inputMode: 'decimal', autocomplete: 'off', class: 'rate-input', value: editing?.fxRate ?? '' });
@@ -1651,6 +1730,32 @@ async function expenseFormView(groupId, expenseId, query) {
     },
   });
 
+  // Repetir (solo al crear y en la moneda del grupo): alquiler, luz, internet…
+  let repeat = 'none';
+  const repeatChip = !editing && pickerChip({
+    leading: icon('repeat', { small: true }),
+    label: 'Repetir',
+    text: 'No se repite',
+    options: [['none', 'No se repite'], ...Object.entries(FREQUENCY_LABELS)],
+    value: 'none',
+    ariaLabel: 'Repetir',
+    onChange: (value, { setText }) => {
+      repeat = value;
+      setText(value === 'none' ? 'No se repite' : FREQUENCY_LABELS[value]);
+    },
+  });
+  const syncRepeat = () => {
+    if (!repeatChip) return;
+    repeatChip.hidden = currency !== base;
+    if (currency !== base && repeat !== 'none') {
+      repeat = 'none';
+      repeatChip.update({ value: 'none', text: 'No se repite', leading: icon('repeat', { small: true }) });
+    }
+  };
+  // Editar una repetición: el cambio puede aplicarse también a las próximas.
+  const series = editing?.recurringId ? (bundle.recurring ?? []).find((rule) => rule.id === editing.recurringId) : null;
+  const applyToSeries = series && el('input', { type: 'checkbox', class: 'switch', 'aria-label': 'Aplicar también a las próximas' });
+
   // Categoría: se sugiere sola por la descripción hasta que la persona elige una.
   const categoryChip = pickerChip({
     leading: categoryIcon(category, { small: true }),
@@ -1715,6 +1820,8 @@ async function expenseFormView(groupId, expenseId, query) {
         body.payers = payerEntries;
         body.payerId = payerEntries.reduce((best, entry) => (entry.value > best.value ? entry : best)).personId;
       }
+      if (!editing && repeat !== 'none') body.repeat = repeat;
+      if (applyToSeries?.checked) body.applyToRecurring = true;
       if (currency === base) {
         body.amountCents = original;
       } else {
@@ -1764,7 +1871,8 @@ async function expenseFormView(groupId, expenseId, query) {
           },
         });
         navigate(`#/g/${groupId}`, { replace: true });
-        toast(result === 'queued' ? 'Sin conexión: guardado en el móvil. Se enviará solo.' : 'Gasto añadido');
+        toast(result === 'queued' ? 'Sin conexión: guardado en el móvil. Se enviará solo.'
+          : body.repeat ? `Gasto añadido · se repetirá ${FREQUENCY_LABELS[body.repeat].toLowerCase()}` : 'Gasto añadido');
       } catch (requestError) {
         submit.disabled = false;
         if (requestError.status === 409 && requestError.data?.expense) {
@@ -1780,7 +1888,14 @@ async function expenseFormView(groupId, expenseId, query) {
     el('span', { class: 'gh-label', text: editing ? `${bundle.group.title} · editar gasto` : `${bundle.group.title} · ¿cuánto ha sido?` }),
     el('div', { class: 'amount-row' }, amount, currencyInput)),
   description,
-  el('div', { class: 'chips' }, groupChip, payerChip, dateChip(date, () => refreshRate()), categoryChip),
+  el('div', { class: 'chips' }, groupChip, payerChip, dateChip(date, () => refreshRate()), categoryChip, repeatChip),
+  series && el('label', { class: 'card switch-row' },
+    el('span', {},
+      el('strong', { text: `Se repite ${FREQUENCY_LABELS[series.frequency].toLowerCase()}` }),
+      el('span', { class: 'muted small block', text: series.pausedReason
+        ? `En pausa: ${series.pausedReason}`
+        : `Próxima vez: ${formatDay(series.nextOn)}. Activa esto para que el cambio se aplique también a las próximas.` })),
+    applyToSeries),
   payersBox,
   fxBox,
   el('div', { class: 'field' },
@@ -1820,6 +1935,7 @@ async function expenseFormView(groupId, expenseId, query) {
   renderFx();
   renderSplitBody();
   renderPayers();
+  syncRepeat();
   // Gasto nuevo en moneda extranjera: se pide ya el tipo del día.
   if (!editing) {
     refreshRate();
@@ -1850,7 +1966,10 @@ function activityText(item) {
   const name = (id, fallback) => (id === meId ? 'ti' : fallback ?? '¿?');
   const desc = `«${data.description ?? '…'}»`;
   switch (item.kind) {
-    case 'expense_created': return `${actor} ${verb('añadió', 'añadiste')} ${desc}`;
+    case 'expense_created':
+      if (data.recurring) return `Gasto recurrente: ${desc}`;
+      return `${actor} ${verb('añadió', 'añadiste')} ${desc}${data.repeat ? ` (${FREQUENCY_LABELS[data.repeat]?.toLowerCase() ?? 'se repite'})` : ''}`;
+    case 'recurring_stopped': return `${actor} ${verb('dejó', 'dejaste')} de repetir ${desc}`;
     case 'expense_updated': {
       const changes = (data.changes ?? []).map((key) => CHANGE_LABELS[key]).filter(Boolean);
       return `${actor} ${verb('editó', 'editaste')} ${desc}${changes.length ? ` (${changes.join(', ')})` : ''}`;
@@ -2133,6 +2252,47 @@ async function settlementFormView(groupId, query) {
   mountGroup(bundle.group, groupTopbar(bundle.group, { title: 'Registrar pago', back: `#/g/${groupId}/saldos` }), form);
 }
 
+// Gastos que se repiten solos (alquiler, luz…): cuándo toca el siguiente y dejar de repetir.
+function recurringCard(bundle) {
+  const rules = bundle.recurring ?? [];
+  if (!rules.length) return null;
+  const cur = bundle.group.baseCurrency;
+  const writable = !bundle.group.archived;
+  return el('div', { class: 'stack' },
+    el('h2', { class: 'section-title', text: `Gastos recurrentes (${rules.length})` }),
+    el('div', { class: 'card list' },
+      rules.map((rule) => el('div', { class: 'row static recurring-row' },
+        categoryTile(rule),
+        el('span', { class: 'row-main' },
+          el('strong', { text: rule.description }),
+          el('span', { class: rule.pausedReason ? 'meta negative' : 'meta', text: rule.pausedReason
+            ? `En pausa: ${rule.pausedReason}`
+            : `${FREQUENCY_LABELS[rule.frequency]} · próximo ${formatDay(rule.nextOn).toLowerCase()}` }),
+          writable && el('button', {
+            type: 'button',
+            class: 'link-btn danger',
+            text: 'Dejar de repetir',
+            onClick: async () => {
+              const ok = await confirmSheet({
+                title: `¿Dejar de repetir «${rule.description}»?`,
+                message: 'Los gastos ya apuntados se quedan; solo dejarán de crearse nuevos.',
+                confirmLabel: 'Dejar de repetir',
+                danger: true,
+              });
+              if (!ok) return;
+              try {
+                await api(`recurring/${rule.id}`, { method: 'DELETE' });
+                toast(`«${rule.description}» ya no se repite`);
+                render();
+              } catch (error) {
+                handleError(error);
+              }
+            },
+          })),
+        el('strong', { class: 'amount', text: formatMoney(rule.amountCents, cur) })))),
+    el('p', { class: 'muted small', text: 'Para cambiar el importe, edita la última vez que se apuntó y activa «aplicar también a las próximas».' }));
+}
+
 // Reparto con el que empieza cada gasto nuevo del grupo (p. ej. 60/40 en Pareja).
 function defaultSplitCard(bundle, patch) {
   const current = new Map((bundle.group.defaultSplit || []).map((entry) => [entry.personId, entry.weight]));
@@ -2269,6 +2429,19 @@ async function settingsView(groupId) {
           el('span', { class: 'muted small block', text: 'Propone el mínimo de pagos entre todos, aunque alguien acabe pagando a quien no le prestó directamente.' })),
         simplify),
 
+      el('label', { class: 'card switch-row' },
+        el('span', {},
+          el('strong', { text: 'Es un viaje' }),
+          el('span', { class: 'muted small block', text: 'El resumen muestra cuánto se gastó cada día y lo que le costó el viaje a cada uno.' })),
+        el('input', {
+          type: 'checkbox',
+          class: 'switch',
+          checked: group.isTrip,
+          disabled: !writable,
+          onChange: (event) => patch({ isTrip: event.target.checked }, event.target.checked ? 'Grupo de viaje' : 'Ya no es un viaje', { rerender: false }),
+        })),
+
+      recurringCard(bundle),
       writable && bundle.members.length > 1 && defaultSplitCard(bundle, patch),
       shareCard(bundle),
 

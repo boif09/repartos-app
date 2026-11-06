@@ -17,7 +17,7 @@ if (production && allowedUsers.length === 0) {
   process.exit(1);
 }
 
-const { server, basePath } = createApp({ auth: { devUser, allowedUsers } });
+const { server, basePath } = createApp({ auth: { devUser, allowedUsers }, recurringIntervalMs: 60 * 60 * 1000 });
 
 server.listen(port, host, () => {
   console.log(`Repartos iniciado en http://${host}:${port}${basePath === '/' ? '' : basePath}/`);

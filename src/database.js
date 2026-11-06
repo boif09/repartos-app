@@ -163,6 +163,34 @@ export const MIGRATIONS = [
       ALTER TABLE expense_groups ADD COLUMN color TEXT;
     `,
   },
+  {
+    version: 5,
+    name: 'gastos recurrentes y grupos de viaje',
+    sql: `
+      -- Viaje: el resumen muestra el gasto de cada día.
+      ALTER TABLE expense_groups ADD COLUMN is_trip INTEGER NOT NULL DEFAULT 0;
+
+      -- Un gasto que se repite. id = el del gasto con el que se creó la serie.
+      -- template: el cuerpo del gasto (importe, quién pagó, reparto…) sin id ni fecha, siempre en
+      -- la moneda del grupo. next_on: la próxima fecha que falta por crear.
+      -- paused_reason: si una repetición no se pudo crear (p. ej. alguien salió del grupo).
+      CREATE TABLE recurring_expenses (
+        id             TEXT PRIMARY KEY,
+        group_id       INTEGER NOT NULL REFERENCES expense_groups(id) ON DELETE CASCADE,
+        frequency      TEXT NOT NULL CHECK (frequency IN ('weekly', 'monthly', 'yearly')),
+        anchor_on      TEXT NOT NULL,
+        next_on        TEXT NOT NULL,
+        template       TEXT NOT NULL,
+        created_by     INTEGER REFERENCES people(id),
+        paused_reason  TEXT,
+        created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX ix_recurring_next ON recurring_expenses(next_on);
+
+      -- De qué serie salió cada gasto (NULL = gasto normal).
+      ALTER TABLE expenses ADD COLUMN recurring_id TEXT;
+    `,
+  },
 ];
 
 export function openDatabase(options = {}) {

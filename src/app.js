@@ -128,6 +128,20 @@ export function createApp(options = {}) {
     },
   });
   push = createPushService(repo, options.push);
+
+  // Gastos recurrentes: al arrancar y cada hora se crean los que ya tocan (los tests lo llaman a mano).
+  if (options.recurring !== false && options.recurringIntervalMs) {
+    const runRecurring = () => {
+      try {
+        const created = repo.generateRecurring();
+        if (created) console.log(`Gastos recurrentes creados: ${created}`);
+      } catch (error) {
+        console.error('Error al generar gastos recurrentes:', error);
+      }
+    };
+    runRecurring();
+    setInterval(runRecurring, options.recurringIntervalMs).unref();
+  }
   const fx = createFxService(db, options.fx);
 
   // [método, patrón, handler(ctx)] -> handler devuelve [status, body]. ctx = { params, body, me }.
@@ -159,6 +173,7 @@ export function createApp(options = {}) {
     ['PUT', /^\/expenses\/([\w-]+)$/, ({ params, body, me }) => [200, { expense: repo.updateExpense(params[0], body, me.id) }]],
     ['DELETE', /^\/expenses\/([\w-]+)$/, ({ params, body, me }) => [200, { expense: repo.deleteExpense(params[0], body, me.id) }]],
     ['POST', /^\/expenses\/([\w-]+)\/restore$/, ({ params, me }) => [200, { expense: repo.restoreExpense(params[0], me.id) }]],
+    ['DELETE', /^\/recurring\/([\w-]+)$/, ({ params, me }) => [200, { recurring: repo.stopRecurring(params[0], me.id) }]],
 
     ['POST', /^\/groups\/(\d+)\/settlements$/, ({ params, body, me }) => {
       const { created, settlement } = repo.createSettlement(params[0], body, me.id);
@@ -256,5 +271,5 @@ export function createApp(options = {}) {
     if (!options.db) db.close();
   });
 
-  return { server, basePath, db };
+  return { server, basePath, db, repo };
 }
